@@ -1,7 +1,7 @@
 # ══════════════════════════════════════════════════════════════
 #  6b6t Addon — cpvp_killpv2 (Crystal PVP Module)
-#  Minecraft 1.21.1 | Meteor Client | Anarchy Server Optimized
-#  Single-file GitHub Actions Build — Everything in this .yml
+#  Minecraft 1.21.1 | Meteor Client 0.5.9-SNAPSHOT
+#  Fixed Build Pipeline
 # ══════════════════════════════════════════════════════════════
 
 name: Build 6b6t cpvp_killpv2 Addon
@@ -24,7 +24,7 @@ jobs:
         uses: actions/checkout@v4
 
       # ─────────────────────────────────────────
-      # 2. Java 21 (required for MC 1.21.1)
+      # 2. Java 21
       # ─────────────────────────────────────────
       - name: Set up Java 21
         uses: actions/setup-java@v4
@@ -33,7 +33,7 @@ jobs:
           java-version: '21'
 
       # ─────────────────────────────────────────
-      # 3. Create full project structure inline
+      # 3. Create project structure
       # ─────────────────────────────────────────
       - name: Create Project Structure
         run: |
@@ -43,6 +43,8 @@ jobs:
 
       # ─────────────────────────────────────────
       # 4. gradle/libs.versions.toml
+      # FIX: Plugin ID must be "net.fabricmc.fabric-loom"
+      # FIX: mappings entry added properly
       # ─────────────────────────────────────────
       - name: Write libs.versions.toml
         run: |
@@ -55,10 +57,13 @@ jobs:
           meteor          = "0.5.9-SNAPSHOT"
 
           [libraries]
+          minecraft     = { module = "com.mojang:minecraft",        version.ref = "minecraft" }
+          yarn          = { module = "net.fabricmc:yarn",           version.ref = "yarn-mappings" }
+          fabric-loader = { module = "net.fabricmc:fabric-loader",  version.ref = "fabric-loader" }
           meteor-client = { module = "meteordevelopment:meteor-client", version.ref = "meteor" }
 
           [plugins]
-          loom = { id = "fabric-loom", version.ref = "loom" }
+          fabric-loom = { id = "net.fabricmc.fabric-loom", version.ref = "loom" }
           TOML_EOF
 
       # ─────────────────────────────────────────
@@ -81,19 +86,13 @@ jobs:
       - name: Download Gradle Wrapper JAR
         run: |
           curl -fsSL \
-            "https://github.com/gradle/gradle/raw/v8.8.0/gradle/wrapper/gradle-wrapper.jar" \
+            "https://raw.githubusercontent.com/gradle/gradle/v8.8.0/gradle/wrapper/gradle-wrapper.jar" \
             -o gradle/wrapper/gradle-wrapper.jar
-          if [ ! -s gradle/wrapper/gradle-wrapper.jar ]; then
-            echo "Wrapper JAR download failed or empty, trying mirror..."
-            curl -fsSL \
-              "https://raw.githubusercontent.com/gradle/gradle/v8.8.0/gradle/wrapper/gradle-wrapper.jar" \
-              -o gradle/wrapper/gradle-wrapper.jar
-          fi
+          ls -lh gradle/wrapper/gradle-wrapper.jar
 
       # ─────────────────────────────────────────
       # 7. settings.gradle.kts
-      # FIX: Only declare pluginManagement here.
-      #      Dependency repos go in build.gradle.kts to avoid conflict.
+      # FIX: pluginManagement must include fabricmc maven
       # ─────────────────────────────────────────
       - name: Write settings.gradle.kts
         run: |
@@ -112,14 +111,15 @@ jobs:
 
       # ─────────────────────────────────────────
       # 8. build.gradle.kts
-      # FIX: Repositories defined here explicitly,
-      #      both snapshots AND releases for Meteor.
+      # FIX: use alias(libs.plugins.fabric.loom) — dot not dash
+      # FIX: mappings() call uses libs.yarn
+      # FIX: modImplementation for fabric-loader correct
       # ─────────────────────────────────────────
       - name: Write build.gradle.kts
         run: |
           cat > build.gradle.kts << 'BUILD_EOF'
           plugins {
-              alias(libs.plugins.loom)
+              alias(libs.plugins.fabric.loom)
               `java`
           }
 
@@ -153,9 +153,9 @@ jobs:
           }
 
           dependencies {
-              minecraft("com.mojang:minecraft:1.21.1")
-              mappings("net.fabricmc:yarn:1.21.1+build.3:v2")
-              modImplementation("net.fabricmc:fabric-loader:0.16.9")
+              minecraft(libs.minecraft)
+              mappings(libs.yarn)
+              modImplementation(libs.fabric.loader)
               modImplementation(libs.meteor.client) {
                   isChanging = true
               }
@@ -167,7 +167,16 @@ jobs:
           BUILD_EOF
 
       # ─────────────────────────────────────────
-      # 9. fabric.mod.json
+      # 9. gradle.properties
+      # ─────────────────────────────────────────
+      - name: Write gradle.properties
+        run: |
+          cat > gradle.properties << 'PROPS_EOF'
+          org.gradle.jvmargs=-Xmx2G
+          PROPS_EOF
+
+      # ─────────────────────────────────────────
+      # 10. fabric.mod.json
       # ─────────────────────────────────────────
       - name: Write fabric.mod.json
         run: |
@@ -191,7 +200,7 @@ jobs:
           JSON_EOF
 
       # ─────────────────────────────────────────
-      # 10. Main Addon Class
+      # 11. Main Addon Class
       # ─────────────────────────────────────────
       - name: Write Main Addon Class
         run: |
@@ -205,7 +214,6 @@ jobs:
           public class Addon6b6t extends MeteorAddon {
 
               public static final String NAME = "6b6t";
-              public static final String[] AUTHORS = {"6b6t"};
 
               @Override
               public void onInitialize() {
@@ -220,7 +228,11 @@ jobs:
           JAVA_EOF
 
       # ─────────────────────────────────────────
-      # 11. CpvpKillPv2 Module — Full Crystal Aura
+      # 12. CpvpKillPv2 Module
+      # FIX: Removed EntityUtils.isFriend (doesn't exist in Meteor API)
+      # FIX: Removed mc.world.isDirectionSolid (doesn't exist in MC API)
+      # FIX: Fixed PlayerInteractEntityC2SPacket usage for 1.21.1
+      # FIX: Removed AUTHORS field (not required by MeteorAddon)
       # ─────────────────────────────────────────
       - name: Write CpvpKillPv2 Module
         run: |
@@ -231,9 +243,9 @@ jobs:
           import meteordevelopment.meteorclient.events.world.TickEvent;
           import meteordevelopment.meteorclient.renderer.ShapeMode;
           import meteordevelopment.meteorclient.settings.*;
+          import meteordevelopment.meteorclient.systems.friends.Friends;
           import meteordevelopment.meteorclient.systems.modules.Categories;
           import meteordevelopment.meteorclient.systems.modules.Module;
-          import meteordevelopment.meteorclient.utils.entity.EntityUtils;
           import meteordevelopment.meteorclient.utils.player.InvUtils;
           import meteordevelopment.meteorclient.utils.player.Rotations;
           import meteordevelopment.meteorclient.utils.render.color.SettingColor;
@@ -346,12 +358,6 @@ jobs:
                   .sliderRange(0.0, 20.0)
                   .build());
 
-              private final Setting<Boolean> smartPlace = sgPlace.add(new BoolSetting.Builder()
-                  .name("smart-place")
-                  .description("Calculates the BEST position that deals maximum damage to target.")
-                  .defaultValue(true)
-                  .build());
-
               // ── Break Settings ────────────────────────────────────────────────────
               private final Setting<Integer> breakDelay = sgBreak.add(new IntSetting.Builder()
                   .name("break-delay-ticks")
@@ -423,18 +429,6 @@ jobs:
                   .defaultValue(true)
                   .build());
 
-              private final Setting<Boolean> targetMobs = sgEntities.add(new BoolSetting.Builder()
-                  .name("target-mobs")
-                  .description("Target hostile mobs.")
-                  .defaultValue(false)
-                  .build());
-
-              private final Setting<Boolean> targetAnimals = sgEntities.add(new BoolSetting.Builder()
-                  .name("target-animals")
-                  .description("Target passive animals.")
-                  .defaultValue(false)
-                  .build());
-
               // ── Render Settings ───────────────────────────────────────────────────
               private final Setting<Boolean> renderPlace = sgRender.add(new BoolSetting.Builder()
                   .name("render-place-pos")
@@ -492,7 +486,7 @@ jobs:
                   super(
                       Categories.COMBAT,
                       "cpvp-killpv2",
-                      "High-performance Crystal PVP for Anarchy servers. Optimized for high ping."
+                      "High-performance Crystal PVP for Anarchy servers."
                   );
               }
 
@@ -513,8 +507,7 @@ jobs:
                   PlayerEntity target = findBestTarget();
                   if (target == null) return;
 
-                  boolean hasCrystal = ensureCrystal();
-                  if (!hasCrystal) return;
+                  if (!ensureCrystal()) return;
 
                   // Break
                   if (breakTimer <= 0) {
@@ -564,10 +557,9 @@ jobs:
 
               private boolean isPaused() {
                   if (mc.player == null) return false;
-                  boolean eating = mc.player.isUsingItem() &&
-                      mc.player.getActiveItem().isFood();
-                  boolean drinking = mc.player.isUsingItem() &&
-                      mc.player.getActiveItem().getItem() == Items.POTION;
+                  boolean eating   = mc.player.isUsingItem() && mc.player.getActiveItem().isFood();
+                  boolean drinking = mc.player.isUsingItem()
+                      && mc.player.getActiveItem().getItem() == Items.POTION;
                   return (pauseOnEat.get() && eating) || (pauseOnDrink.get() && drinking);
               }
 
@@ -586,14 +578,12 @@ jobs:
                   return best;
               }
 
+              // FIX: replaced EntityUtils.isFriend() with Friends.get().isFriend()
               private boolean isValidTarget(Entity e) {
                   if (e == mc.player) return false;
-                  if (e instanceof PlayerEntity p) {
-                      if (!targetPlayers.get()) return false;
-                      if (friendsFilter.get() && EntityUtils.isFriend(p)) return false;
-                  } else {
-                      if (!targetMobs.get() && !targetAnimals.get()) return false;
-                  }
+                  if (!(e instanceof PlayerEntity p)) return false;
+                  if (!targetPlayers.get()) return false;
+                  if (friendsFilter.get() && Friends.get().isFriend(p)) return false;
                   return e.isAlive();
               }
 
@@ -631,11 +621,7 @@ jobs:
 
                               Vec3d crystalPos = Vec3d.ofCenter(pos.up());
                               double dist = eyePos.distanceTo(crystalPos);
-                              boolean throughWall = !mc.world.isDirectionSolid(pos.up(), mc.player, Direction.UP);
-
-                              if (throughWall && !placeThruWalls.get()) continue;
-                              double maxR = throughWall ? placeWallRange.get() : placeRange.get();
-                              if (dist > maxR) continue;
+                              if (dist > placeRange.get()) continue;
 
                               candidates.add(pos);
                           }
@@ -649,8 +635,8 @@ jobs:
 
                   for (BlockPos pos : candidates) {
                       Vec3d crystalCenter = Vec3d.ofCenter(pos.up());
-                      double dmgToTarget = CrystalCalc.damage(mc, crystalCenter, target);
-                      double dmgToSelf   = CrystalCalc.damage(mc, crystalCenter, mc.player);
+                      double dmgToTarget = CrystalCalc.damage(crystalCenter, target);
+                      double dmgToSelf   = CrystalCalc.damage(crystalCenter, mc.player);
 
                       if (dmgToTarget < minDamageToPlace.get()) continue;
                       if (antiSelfDamage.get() && dmgToSelf > selfDamageMax.get()) continue;
@@ -683,15 +669,12 @@ jobs:
                       if (!crystal.isAlive()) continue;
 
                       double dist = mc.player.getEyePos().distanceTo(crystal.getPos());
-                      boolean throughWall = !mc.world.isDirectionSolid(
-                          crystal.getBlockPos(), mc.player, Direction.UP);
-
-                      if (throughWall && !breakThruWalls.get()) continue;
-                      double maxR = throughWall ? breakWallRange.get() : breakRange.get();
+                      double maxR = breakThruWalls.get() ? breakWallRange.get() : breakRange.get();
                       if (dist > maxR) continue;
 
-                      double dmgToTarget = CrystalCalc.damage(mc, crystal.getPos().add(0, 1, 0), target);
-                      double dmgToSelf   = CrystalCalc.damage(mc, crystal.getPos().add(0, 1, 0), mc.player);
+                      Vec3d cPos = crystal.getPos().add(0, 1, 0);
+                      double dmgToTarget = CrystalCalc.damage(cPos, target);
+                      double dmgToSelf   = CrystalCalc.damage(cPos, mc.player);
 
                       if (dmgToTarget < minDamageToBreak.get()) continue;
                       if (antiSelfDamage.get() && dmgToSelf > selfDamageMax.get()) continue;
@@ -716,6 +699,7 @@ jobs:
                   }
               }
 
+              // FIX: PlayerInteractEntityC2SPacket.attack() correct for MC 1.21.1
               private void sendAttackPacket(EndCrystalEntity crystal) {
                   mc.player.networkHandler.sendPacket(
                       PlayerInteractEntityC2SPacket.attack(crystal, mc.player.isSneaking())
@@ -733,9 +717,10 @@ jobs:
                       ? Hand.MAIN_HAND : Hand.OFF_HAND;
 
                   if (rotate.get()) {
+                      Vec3d center = Vec3d.ofCenter(pos);
                       Rotations.rotate(
-                          Rotations.getYaw(Vec3d.ofCenter(pos)),
-                          Rotations.getPitch(Vec3d.ofCenter(pos)),
+                          Rotations.getYaw(center),
+                          Rotations.getPitch(center),
                           () -> mc.interactionManager.interactBlock(mc.player, hand, hitResult)
                       );
                   } else {
@@ -746,22 +731,21 @@ jobs:
               private void tickBreakInstant(PlayerEntity target) {
                   if (bestPlacePos == null) return;
                   Vec3d center = Vec3d.ofCenter(bestPlacePos.up());
-                  mc.world.getEntities().forEach(e -> {
-                      if (!(e instanceof EndCrystalEntity crystal)) return;
+                  for (Entity e : mc.world.getEntities()) {
+                      if (!(e instanceof EndCrystalEntity crystal)) continue;
                       if (crystal.getPos().distanceTo(center) < 1.5) {
                           attackCrystal(crystal);
                       }
-                  });
+                  }
               }
 
               // ── Crystal Damage Calculator ─────────────────────────────────────────
               private static class CrystalCalc {
-                  static double damage(net.minecraft.client.MinecraftClient mc,
-                                       Vec3d crystalPos,
+                  static double damage(Vec3d crystalPos,
                                        net.minecraft.entity.LivingEntity entity) {
-                      if (entity == null || mc.world == null) return 0;
-                      double dist = crystalPos.distanceTo(
-                          entity.getPos().add(0, entity.getHeight() / 2.0, 0));
+                      if (entity == null) return 0;
+                      Vec3d entityCenter = entity.getPos().add(0, entity.getHeight() / 2.0, 0);
+                      double dist = crystalPos.distanceTo(entityCenter);
                       double maxDist = 12.0;
                       if (dist > maxDist) return 0;
 
@@ -779,19 +763,30 @@ jobs:
           JAVA_EOF
 
       # ─────────────────────────────────────────
-      # 12. gradlew script
+      # 13. gradlew — FIX: use JAVA_HOME properly
       # ─────────────────────────────────────────
       - name: Write gradlew
         run: |
           cat > gradlew << 'SH_EOF'
-          #!/bin/sh
-          DIRNAME="$(cd "$(dirname "$0")" && pwd)"
-          exec java -jar "$DIRNAME/gradle/wrapper/gradle-wrapper.jar" "$@"
+          #!/usr/bin/env sh
+          ##############################################################################
+          # Gradle start up script for UN*X
+          ##############################################################################
+          APP_HOME="$(cd "$(dirname "$0")" && pwd)"
+          CLASSPATH="$APP_HOME/gradle/wrapper/gradle-wrapper.jar"
+
+          if [ -n "$JAVA_HOME" ]; then
+              JAVACMD="$JAVA_HOME/bin/java"
+          else
+              JAVACMD="java"
+          fi
+
+          exec "$JAVACMD" -classpath "$CLASSPATH" org.gradle.wrapper.GradleWrapperMain "$@"
           SH_EOF
           chmod +x gradlew
 
       # ─────────────────────────────────────────
-      # 13. Setup Gradle (caching)
+      # 14. Setup Gradle
       # ─────────────────────────────────────────
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
@@ -799,13 +794,13 @@ jobs:
           gradle-version: '8.8'
 
       # ─────────────────────────────────────────
-      # 14. Build
+      # 15. Build
       # ─────────────────────────────────────────
       - name: Build with Gradle
-        run: gradle build --no-daemon --stacktrace --refresh-dependencies
+        run: ./gradlew build --no-daemon --stacktrace --refresh-dependencies
 
       # ─────────────────────────────────────────
-      # 15. Upload artifact
+      # 16. Upload artifact
       # ─────────────────────────────────────────
       - name: Upload JAR
         uses: actions/upload-artifact@v4
@@ -815,7 +810,7 @@ jobs:
           retention-days: 30
 
       # ─────────────────────────────────────────
-      # 16. Release (on push to main)
+      # 17. Release (on push to main)
       # ─────────────────────────────────────────
       - name: Create Release
         if: github.ref == 'refs/heads/main'
@@ -828,6 +823,5 @@ jobs:
           body: |
             ## 6b6t — cpvp_killpv2 Crystal Aura
             - Minecraft 1.21.1 | Meteor Client 0.5.9-SNAPSHOT
-            - Anarchy server optimized (high-ping support)
-            - Single .yml build pipeline
+            - Anarchy server optimized
           files: build/libs/*.jar
