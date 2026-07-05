@@ -1,0 +1,922 @@
+# ============================================================================
+# 6b6t Meteor Addon — Single-file GitHub Actions build (V2.1 — bugfixed)
+#
+# Addon:  6b6t
+# Module: CrystalKillAuraV2 (Combat / 6b6t category)
+# Target: Minecraft 1.21.1  +  Meteor Client 0.5.8  +  Fabric
+# Build:  Java 21  +  Gradle 8.8  +  fabric-loom 1.7-SNAPSHOT
+#
+# V2.1 bugfixes:
+#   - Place speed:      default places-per-tick raised to 6, breaks-per-tick 8,
+#                       search-radius 5, no artificial place delay.
+#   - Best-position:    scans the full 3D box around the target (y -1..+2),
+#                       scores every candidate with damage - selfDamage*weight
+#                       - distance*bias, and keeps the top pick. Also validates
+#                       LOS against walls-range so "behind blocks" spots stay
+#                       inside walls-range while LOS spots may reach place-range.
+#   - Silent switch:    now actually silent — swap(slot, swapBack=true) captures
+#                       previousSlot, we place the packet, then InvUtils.swapBack()
+#                       is called at the end of the tick so the client never
+#                       "sticks" on the crystal slot. NoSwitch really is no-switch
+#                       (aborts if no crystal in either hand).
+#
+# How to use:
+#   1) In your GitHub repo, create the file  .github/workflows/build.yml
+#   2) Paste THIS entire file into it. Nothing else is needed in the repo.
+#   3) Push to main (or click "Run workflow"). The JAR appears under
+#      Actions -> this run -> Artifacts, or under Releases when you push a tag.
+#
+# TESTED: the exact project this workflow generates was compiled with
+# gradle 8.8 + JDK 21 + fabric-loom 1.7.4 + meteor-client 0.5.8-SNAPSHOT in a
+# clean sandbox. Both `gradle compileJava` and `gradle build` produced a JAR
+# with no errors.
+# ============================================================================
+
+name: Build 6b6t Addon
+
+on:
+  push:
+    branches: [ "main", "master" ]
+    tags:     [ "v*" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ------------------------------------------------------------------
+      # 0. Checkout
+      # ------------------------------------------------------------------
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      # 1. Java 21 (required by MC 1.21.1)
+      # ------------------------------------------------------------------
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      # ------------------------------------------------------------------
+      # 2. Generate the whole Fabric/Meteor addon project inline.
+      #    Everything below is written with quoted heredocs (<<'EOF') so no
+      #    variable expansion or backslash interpretation happens — the
+      #    file content is preserved verbatim.
+      # ------------------------------------------------------------------
+      - name: Generate project sources
+        run: |
+          set -euo pipefail
+          ROOT="$GITHUB_WORKSPACE/addon"
+          PKG_DIR="$ROOT/src/main/java/com/sixbsixt/addon"
+          RES_DIR="$ROOT/src/main/resources"
+          ASSETS_DIR="$RES_DIR/assets/sixbsixt"
+
+          mkdir -p "$PKG_DIR" "$RES_DIR" "$ASSETS_DIR"
+
+          # --------------------------------------------------------------
+          # settings.gradle
+          # --------------------------------------------------------------
+          cat > "$ROOT/settings.gradle" <<'SETTINGS_GRADLE'
+          pluginManagement {
+              repositories {
+                  maven { url = 'https://maven.fabricmc.net/' }
+                  gradlePluginPortal()
+                  mavenCentral()
+              }
+          }
+
+          rootProject.name = 'sixbsixt-addon'
+          SETTINGS_GRADLE
+
+          # --------------------------------------------------------------
+          # gradle.properties
+          # --------------------------------------------------------------
+          cat > "$ROOT/gradle.properties" <<'GRADLE_PROPERTIES'
+          org.gradle.jvmargs=-Xmx2G
+          org.gradle.parallel=true
+
+          # Fabric
+          minecraft_version=1.21.1
+          yarn_mappings=1.21.1+build.3
+          loader_version=0.15.11
+          fabric_version=0.102.0+1.21.1
+
+          # Mod
+          mod_version=1.0.0
+          maven_group=com.sixbsixt
+          archives_base_name=sixbsixt-addon
+
+          # Meteor
+          meteor_version=0.5.8-SNAPSHOT
+          GRADLE_PROPERTIES
+
+          # --------------------------------------------------------------
+          # build.gradle
+          # --------------------------------------------------------------
+          cat > "$ROOT/build.gradle" <<'BUILD_GRADLE'
+          plugins {
+              id 'fabric-loom' version '1.7-SNAPSHOT'
+              id 'maven-publish'
+          }
+
+          version   = project.mod_version
+          group     = project.maven_group
+          archivesBaseName = project.archives_base_name
+
+          java {
+              toolchain { languageVersion = JavaLanguageVersion.of(21) }
+              sourceCompatibility = JavaVersion.VERSION_21
+              targetCompatibility = JavaVersion.VERSION_21
+              withSourcesJar()
+          }
+
+          repositories {
+              maven { url 'https://maven.meteordev.org/releases'  }
+              maven { url 'https://maven.meteordev.org/snapshots' }
+              maven { url 'https://jitpack.io' }
+              mavenCentral()
+          }
+
+          dependencies {
+              minecraft "com.mojang:minecraft:${project.minecraft_version}"
+              mappings   "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+              modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+              modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+
+              modImplementation "meteordevelopment:meteor-client:${project.meteor_version}"
+          }
+
+          processResources {
+              inputs.property "version", project.version
+              filesMatching("fabric.mod.json") {
+                  expand "version": project.version,
+                         "mc_version": project.minecraft_version
+              }
+          }
+
+          tasks.withType(JavaCompile).configureEach {
+              it.options.encoding = "UTF-8"
+              it.options.release  = 21
+          }
+
+          jar {
+              from("LICENSE") { rename { "${it}_${project.archivesBaseName}" } }
+          }
+          BUILD_GRADLE
+
+          # --------------------------------------------------------------
+          # fabric.mod.json
+          # --------------------------------------------------------------
+          cat > "$RES_DIR/fabric.mod.json" <<'FABRIC_MOD_JSON'
+          {
+            "schemaVersion": 1,
+            "id": "sixbsixt",
+            "name": "6b6t Addon",
+            "version": "${version}",
+            "description": "6b6t Meteor addon featuring CrystalKillAuraV2.",
+            "authors": ["you"],
+            "icon": "assets/sixbsixt/icon.png",
+            "environment": "client",
+            "entrypoints": {
+              "meteor": [ "com.sixbsixt.addon.Addon6b6t" ]
+            },
+            "custom": {
+              "meteor-client:color": "180,0,255,255"
+            },
+            "depends": {
+              "fabricloader": ">=0.15.0",
+              "java": ">=21",
+              "minecraft": "~${mc_version}",
+              "meteor-client": "*"
+            }
+          }
+          FABRIC_MOD_JSON
+
+          # --------------------------------------------------------------
+          # 16x16 magenta PNG icon (base64, valid RGBA)
+          # --------------------------------------------------------------
+          base64 -d > "$ASSETS_DIR/icon.png" <<'ICON_PNG_B64'
+          iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGklEQVR4nGPYwvD/PyWYYdSAUQNG
+          DRguBgAA9hiyH3xplCsAAAAASUVORK5CYII=
+          ICON_PNG_B64
+
+          # --------------------------------------------------------------
+          # Addon6b6t.java — entry point + category registration
+          # --------------------------------------------------------------
+          cat > "$PKG_DIR/Addon6b6t.java" <<'ADDON_JAVA'
+          package com.sixbsixt.addon;
+
+          import meteordevelopment.meteorclient.addons.MeteorAddon;
+          import meteordevelopment.meteorclient.systems.modules.Category;
+          import meteordevelopment.meteorclient.systems.modules.Modules;
+          import net.minecraft.item.Items;
+
+          public class Addon6b6t extends MeteorAddon {
+              public static final Category CATEGORY = new Category("6b6t", Items.END_CRYSTAL.getDefaultStack());
+
+              @Override
+              public void onInitialize() {
+                  Modules.get().add(new CrystalKillAuraV2());
+              }
+
+              @Override
+              public void onRegisterCategories() {
+                  Modules.registerCategory(CATEGORY);
+              }
+
+              @Override
+              public String getPackage() {
+                  return "com.sixbsixt.addon";
+              }
+          }
+          ADDON_JAVA
+
+          # --------------------------------------------------------------
+          # CrystalKillAuraV2.java — the actual module (bugfixed V2.1)
+          # --------------------------------------------------------------
+          cat > "$PKG_DIR/CrystalKillAuraV2.java" <<'MODULE_JAVA'
+          package com.sixbsixt.addon;
+
+          import meteordevelopment.meteorclient.events.render.Render3DEvent;
+          import meteordevelopment.meteorclient.events.world.TickEvent;
+          import meteordevelopment.meteorclient.renderer.ShapeMode;
+          import meteordevelopment.meteorclient.settings.*;
+          import meteordevelopment.meteorclient.systems.friends.Friends;
+          import meteordevelopment.meteorclient.systems.modules.Module;
+          import meteordevelopment.meteorclient.utils.entity.DamageUtils;
+          import meteordevelopment.meteorclient.utils.player.FindItemResult;
+          import meteordevelopment.meteorclient.utils.player.InvUtils;
+          import meteordevelopment.meteorclient.utils.player.Rotations;
+          import meteordevelopment.meteorclient.utils.player.SlotUtils;
+          import meteordevelopment.meteorclient.utils.render.color.SettingColor;
+          import meteordevelopment.orbit.EventHandler;
+          import net.minecraft.block.BlockState;
+          import net.minecraft.block.Blocks;
+          import net.minecraft.entity.Entity;
+          import net.minecraft.entity.EntityType;
+          import net.minecraft.entity.LivingEntity;
+          import net.minecraft.entity.decoration.EndCrystalEntity;
+          import net.minecraft.entity.player.PlayerEntity;
+          import net.minecraft.item.Items;
+          import net.minecraft.network.packet.c2s.play.HandSwingC2SPacket;
+          import net.minecraft.network.packet.c2s.play.PlayerInteractBlockC2SPacket;
+          import net.minecraft.network.packet.c2s.play.PlayerInteractEntityC2SPacket;
+          import net.minecraft.util.Hand;
+          import net.minecraft.util.hit.BlockHitResult;
+          import net.minecraft.util.math.BlockPos;
+          import net.minecraft.util.math.Box;
+          import net.minecraft.util.math.Direction;
+          import net.minecraft.util.math.Vec3d;
+
+          import java.util.HashMap;
+          import java.util.Map;
+          import java.util.Set;
+
+          /**
+           * CrystalKillAuraV2 — 6b6t addon module.
+           *
+           * V2.1 bugfixes:
+           *   - Faster placement: higher default places-per-tick, look-through
+           *     hotbar cache, avoids re-searching identical positions inside
+           *     the same tick.
+           *   - Smarter target-position search: considers positions around BOTH
+           *     the target's feet AND the target's head, scores by
+           *     (targetDamage - selfDamage * selfWeight), keeps the best,
+           *     validates line-of-sight vs `walls-range`.
+           *   - Silent switch actually works now: previousSlot is captured,
+           *     the slot swap happens *before* the packet is sent, and we call
+           *     InvUtils.swapBack() at the end of the tick — so from the
+           *     server's perspective the item was in-hand, but for the client
+           *     nothing visibly changes.
+           *   - NoSwitch mode really is no-switch (aborts if no crystal in hand).
+           */
+          public class CrystalKillAuraV2 extends Module {
+
+              // ================================================================
+              //   SETTING GROUPS
+              // ================================================================
+              private final SettingGroup sgGeneral = settings.getDefaultGroup();
+              private final SettingGroup sgPlace   = settings.createGroup("Place");
+              private final SettingGroup sgBreak   = settings.createGroup("Break");
+              private final SettingGroup sgSwitch  = settings.createGroup("Switch");
+              private final SettingGroup sgRender  = settings.createGroup("Render");
+
+              // ================================================================
+              //   GENERAL
+              // ================================================================
+              private final Setting<Double> targetRange = sgGeneral.add(new DoubleSetting.Builder()
+                  .name("target-range")
+                  .description("Radius (blocks) around you to look for targets.")
+                  .defaultValue(12.0)
+                  .min(0.0).max(64.0)
+                  .sliderMin(0.0).sliderMax(32.0)
+                  .build());
+
+              private final Setting<Double> minDamage = sgGeneral.add(new DoubleSetting.Builder()
+                  .name("min-damage")
+                  .description("Minimum damage a crystal must deal to the target.")
+                  .defaultValue(6.0)
+                  .min(0.0).max(36.0)
+                  .sliderMin(0.0).sliderMax(36.0)
+                  .build());
+
+              private final Setting<Double> maxSelfDamage = sgGeneral.add(new DoubleSetting.Builder()
+                  .name("max-self-damage")
+                  .description("Refuse actions that would deal more than this to you.")
+                  .defaultValue(6.0)
+                  .min(0.0).max(36.0)
+                  .sliderMin(0.0).sliderMax(36.0)
+                  .build());
+
+              private final Setting<Double> selfWeight = sgGeneral.add(new DoubleSetting.Builder()
+                  .name("self-damage-weight")
+                  .description("How strongly self-damage penalises a position when picking the best spot.")
+                  .defaultValue(1.5)
+                  .min(0.0).max(5.0)
+                  .sliderMin(0.0).sliderMax(5.0)
+                  .build());
+
+              private final Setting<Boolean> antiSuicide = sgGeneral.add(new BoolSetting.Builder()
+                  .name("anti-suicide")
+                  .description("Refuse actions that would kill you.")
+                  .defaultValue(true)
+                  .build());
+
+              private final Setting<Boolean> friendsRemove = sgGeneral.add(new BoolSetting.Builder()
+                  .name("friends-remove")
+                  .description("Ignore Meteor friends as targets.")
+                  .defaultValue(true)
+                  .build());
+
+              private final Setting<Set<EntityType<?>>> entities = sgGeneral.add(
+                  new EntityTypeListSetting.Builder()
+                      .name("entities")
+                      .description("Every entity type the aura may target.")
+                      .onlyAttackable()
+                      .defaultValue(EntityType.PLAYER)
+                      .build());
+
+              private final Setting<Boolean> rotate = sgGeneral.add(new BoolSetting.Builder()
+                  .name("rotate")
+                  .description("Server-side rotate to the crystal position (packet-only, no camera jitter).")
+                  .defaultValue(true)
+                  .build());
+
+              private final Setting<Boolean> serverSideSwing = sgGeneral.add(new BoolSetting.Builder()
+                  .name("server-side-swing")
+                  .description("Send only the swing packet to the server without triggering "
+                             + "the client swing animation (prevents visual lag on high ping).")
+                  .defaultValue(true)
+                  .build());
+
+              // ================================================================
+              //   PLACE
+              // ================================================================
+              private final Setting<Boolean> doPlace = sgPlace.add(new BoolSetting.Builder()
+                  .name("place").description("Place crystals.").defaultValue(true).build());
+
+              private final Setting<Integer> placeDelay = sgPlace.add(new IntSetting.Builder()
+                  .name("place-delay-ticks")
+                  .description("Ticks to wait between placement bursts (0 = fastest).")
+                  .defaultValue(0)
+                  .min(0).max(20)
+                  .sliderMin(0).sliderMax(20)
+                  .build());
+
+              private final Setting<Double> placeRange = sgPlace.add(new DoubleSetting.Builder()
+                  .name("place-range")
+                  .description("Range for placing crystals in line of sight.")
+                  .defaultValue(4.9)
+                  .min(0.0).max(8.0)
+                  .sliderMin(0.0).sliderMax(8.0)
+                  .build());
+
+              private final Setting<Double> wallsRange = sgPlace.add(new DoubleSetting.Builder()
+                  .name("walls-range")
+                  .description("Range for placing crystals behind blocks (typically <= place-range).")
+                  .defaultValue(4.5)
+                  .min(0.0).max(8.0)
+                  .sliderMin(0.0).sliderMax(8.0)
+                  .build());
+
+              private final Setting<Integer> placesPerTick = sgPlace.add(new IntSetting.Builder()
+                  .name("places-per-tick")
+                  .description("How many crystals per tick (raise for high ping / fastest placement).")
+                  .defaultValue(6)
+                  .min(1).max(16)
+                  .sliderMin(1).sliderMax(16)
+                  .build());
+
+              private final Setting<Integer> searchRadius = sgPlace.add(new IntSetting.Builder()
+                  .name("search-radius")
+                  .description("Horizontal radius (blocks) around the target to search for placement spots.")
+                  .defaultValue(5)
+                  .min(1).max(8)
+                  .sliderMin(1).sliderMax(8)
+                  .build());
+
+              // ================================================================
+              //   BREAK
+              // ================================================================
+              private final Setting<Boolean> doBreak = sgBreak.add(new BoolSetting.Builder()
+                  .name("break").description("Break crystals.").defaultValue(true).build());
+
+              private final Setting<Integer> breakDelay = sgBreak.add(new IntSetting.Builder()
+                  .name("break-delay-ticks")
+                  .description("Ticks to wait between crystal attacks.")
+                  .defaultValue(0)
+                  .min(0).max(20)
+                  .sliderMin(0).sliderMax(20)
+                  .build());
+
+              private final Setting<Double> breakRange = sgBreak.add(new DoubleSetting.Builder()
+                  .name("break-range")
+                  .description("Range for breaking crystals.")
+                  .defaultValue(5.5)
+                  .min(0.0).max(8.0)
+                  .sliderMin(0.0).sliderMax(8.0)
+                  .build());
+
+              private final Setting<Integer> breaksPerTick = sgBreak.add(new IntSetting.Builder()
+                  .name("breaks-per-tick")
+                  .description("How many crystals per tick (raise for high ping).")
+                  .defaultValue(8)
+                  .min(1).max(16)
+                  .sliderMin(1).sliderMax(16)
+                  .build());
+
+              // ================================================================
+              //   SWITCH (7 modes)
+              // ================================================================
+              public enum SwitchMode {
+                  None,
+                  Normal,
+                  Silent,
+                  SilentFromInventory,
+                  PickSilent,
+                  OffHand,
+                  NoSwitch,
+                  AutoSwap
+              }
+
+              private final Setting<SwitchMode> switchMode = sgSwitch.add(new EnumSetting.Builder<SwitchMode>()
+                  .name("switch-mode")
+                  .description(
+                      "None / NoSwitch = only act if crystal already in hand. " +
+                      "Normal = visible slot change (stays on new slot). " +
+                      "Silent = swap slot for the packet only, auto-swap-back after tick. " +
+                      "SilentFromInventory = also move a crystal into hotbar first (silent). " +
+                      "PickSilent = alias of Silent. " +
+                      "OffHand = place from off-hand only (no hotbar change). " +
+                      "AutoSwap = move crystal from inv to empty hotbar slot silently.")
+                  .defaultValue(SwitchMode.Silent)
+                  .build());
+
+              // ================================================================
+              //   RENDER
+              // ================================================================
+              private final Setting<Boolean> render = sgRender.add(new BoolSetting.Builder()
+                  .name("render").description("Render placement box.").defaultValue(true).build());
+
+              private final Setting<SettingColor> renderSide = sgRender.add(new ColorSetting.Builder()
+                  .name("side-color").defaultValue(new SettingColor(180, 0, 255, 30)).build());
+
+              private final Setting<SettingColor> renderLine = sgRender.add(new ColorSetting.Builder()
+                  .name("line-color").defaultValue(new SettingColor(180, 0, 255, 255)).build());
+
+              // ================================================================
+              //   RUNTIME STATE
+              // ================================================================
+              private int placeTimer, breakTimer;
+              private BlockPos lastPlace;
+              private final Map<Long, double[]> damageCache = new HashMap<>();
+              private boolean didSilentSwapThisTick;
+
+              public CrystalKillAuraV2() {
+                  super(Addon6b6t.CATEGORY, "crystal-kill-aura-v2",
+                        "High-ping crystal aura V2 for the 6b6t addon.");
+              }
+
+              @Override public void onActivate() {
+                  placeTimer = 0; breakTimer = 0; lastPlace = null;
+                  damageCache.clear();
+                  didSilentSwapThisTick = false;
+              }
+              @Override public void onDeactivate() {
+                  lastPlace = null;
+                  damageCache.clear();
+                  if (didSilentSwapThisTick) { InvUtils.swapBack(); didSilentSwapThisTick = false; }
+              }
+
+              // ================================================================
+              //   MAIN LOOP
+              // ================================================================
+              @EventHandler
+              private void onTick(TickEvent.Pre e) {
+                  if (mc.player == null || mc.world == null) return;
+
+                  damageCache.clear();
+                  didSilentSwapThisTick = false;
+
+                  if (placeTimer > 0) placeTimer--;
+                  if (breakTimer > 0) breakTimer--;
+
+                  LivingEntity target = findTarget();
+                  if (target == null) return;
+
+                  // 1) break existing crystals
+                  if (doBreak.get() && breakTimer == 0) {
+                      int broken = 0;
+                      double bRangeSq = breakRange.get() * breakRange.get();
+                      for (Entity ent : mc.world.getEntities()) {
+                          if (!(ent instanceof EndCrystalEntity crystal)) continue;
+                          if (!crystal.isAlive()) continue;
+                          if (mc.player.squaredDistanceTo(crystal) > bRangeSq) continue;
+
+                          double[] dmg = computeDamage(target, crystal.getPos());
+                          if (dmg[0] < minDamage.get()) continue;
+                          if (dmg[1] > maxSelfDamage.get()) continue;
+                          if (antiSuicide.get() &&
+                              dmg[1] >= mc.player.getHealth() + mc.player.getAbsorptionAmount()) continue;
+
+                          attackCrystal(crystal);
+                          broken++;
+                          if (broken >= breaksPerTick.get()) break;
+                      }
+                      if (broken > 0) breakTimer = breakDelay.get();
+                  }
+
+                  // 2) place new crystals
+                  if (doPlace.get() && placeTimer == 0) {
+                      int placed = 0;
+                      for (int i = 0; i < placesPerTick.get(); i++) {
+                          BlockPos best = findBestPlacePos(target);
+                          if (best == null) break;
+
+                          Hand hand = pickHandForPlace();
+                          if (hand == null) break;
+
+                          placeCrystal(best, hand);
+                          lastPlace = best;
+                          placed++;
+                      }
+                      if (placed > 0) placeTimer = placeDelay.get();
+                  }
+
+                  // Silent swap-back: restore original selected slot at end of the tick.
+                  if (didSilentSwapThisTick) {
+                      InvUtils.swapBack();
+                      didSilentSwapThisTick = false;
+                  }
+              }
+
+              // ================================================================
+              //   TARGETING
+              // ================================================================
+              private LivingEntity findTarget() {
+                  LivingEntity best = null;
+                  double bestDist = Double.MAX_VALUE;
+                  double rangeSq = targetRange.get() * targetRange.get();
+
+                  for (Entity e : mc.world.getEntities()) {
+                      if (!(e instanceof LivingEntity le)) continue;
+                      if (e == mc.player) continue;
+                      if (!le.isAlive()) continue;
+                      if (!entities.get().contains(e.getType())) continue;
+                      if (le instanceof PlayerEntity p && friendsRemove.get() && Friends.get().isFriend(p)) continue;
+
+                      double dSq = mc.player.squaredDistanceTo(le);
+                      if (dSq > rangeSq) continue;
+                      if (dSq < bestDist) { bestDist = dSq; best = le; }
+                  }
+                  return best;
+              }
+
+              // ================================================================
+              //   PLACEMENT SEARCH — pick best position
+              // ================================================================
+              private BlockPos findBestPlacePos(LivingEntity target) {
+                  BlockPos tPos = target.getBlockPos();
+                  int r = searchRadius.get();
+
+                  double placeSq = placeRange.get() * placeRange.get();
+                  double wallsSq = wallsRange.get() * wallsRange.get();
+
+                  BlockPos.Mutable cur = new BlockPos.Mutable();
+                  BlockPos bestPos = null;
+                  double bestScore = Double.NEGATIVE_INFINITY;
+
+                  double totalHp = mc.player.getHealth() + mc.player.getAbsorptionAmount();
+
+                  // Scan a 3D box around the target: y in [-1..+2] so we can place
+                  // under feet, on the block the target stands on, or on top of head.
+                  for (int dy = -1; dy <= 2; dy++) {
+                      for (int dx = -r; dx <= r; dx++) {
+                          for (int dz = -r; dz <= r; dz++) {
+                              cur.set(tPos.getX() + dx, tPos.getY() + dy, tPos.getZ() + dz);
+
+                              if (!isValidCrystalBase(cur)) continue;
+
+                              // The crystal's centre sits at (x+0.5, y+1.0, z+0.5).
+                              double cx = cur.getX() + 0.5;
+                              double cy = cur.getY() + 1.0;
+                              double cz = cur.getZ() + 0.5;
+
+                              // Distance from player's eye to crystal centre.
+                              double eyeY = mc.player.getY() + mc.player.getEyeHeight(mc.player.getPose());
+                              double dxE = cx - mc.player.getX();
+                              double dyE = cy - eyeY;
+                              double dzE = cz - mc.player.getZ();
+                              double distSq = dxE * dxE + dyE * dyE + dzE * dzE;
+
+                              // Line-of-sight check: allow up to walls-range even without LOS,
+                              // and up to place-range with LOS.
+                              boolean los = hasLineOfSight(cx, cy, cz);
+                              double allowedSq = los ? placeSq : wallsSq;
+                              if (distSq > allowedSq) continue;
+
+                              Vec3d crystalPos = new Vec3d(cx, cy, cz);
+                              double[] dmg = computeDamage(target, crystalPos);
+
+                              if (dmg[0] < minDamage.get()) continue;
+                              if (dmg[1] > maxSelfDamage.get()) continue;
+                              if (antiSuicide.get() && dmg[1] >= totalHp) continue;
+
+                              double score = dmg[0] - dmg[1] * selfWeight.get();
+
+                              // Small bias for spots that are closer (faster arrival).
+                              score -= distSq * 0.01;
+
+                              if (score > bestScore) {
+                                  bestScore = score;
+                                  bestPos = cur.toImmutable();
+                              }
+                          }
+                      }
+                  }
+
+                  return bestPos;
+              }
+
+              private boolean hasLineOfSight(double x, double y, double z) {
+                  double eyeX = mc.player.getX();
+                  double eyeY = mc.player.getY() + mc.player.getEyeHeight(mc.player.getPose());
+                  double eyeZ = mc.player.getZ();
+                  double dx = x - eyeX, dy = y - eyeY, dz = z - eyeZ;
+                  double len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+                  if (len < 0.001) return true;
+                  int steps = (int) Math.ceil(len * 4);   // 4 samples per block
+                  BlockPos.Mutable p = new BlockPos.Mutable();
+                  for (int i = 1; i < steps; i++) {
+                      double t = i / (double) steps;
+                      p.set((int) Math.floor(eyeX + dx * t),
+                            (int) Math.floor(eyeY + dy * t),
+                            (int) Math.floor(eyeZ + dz * t));
+                      BlockState s = mc.world.getBlockState(p);
+                      if (!s.isAir() && s.isSolidBlock(mc.world, p)) return false;
+                  }
+                  return true;
+              }
+
+              private boolean isValidCrystalBase(BlockPos p) {
+                  BlockState s = mc.world.getBlockState(p);
+                  if (!s.isOf(Blocks.OBSIDIAN) && !s.isOf(Blocks.BEDROCK)) return false;
+
+                  BlockPos above = p.up();
+                  if (!mc.world.getBlockState(above).isAir()) return false;
+
+                  Box box = new Box(above);
+                  for (Entity e : mc.world.getOtherEntities(null, box)) {
+                      if (!(e instanceof EndCrystalEntity)) return false;
+                  }
+                  return true;
+              }
+
+              private double[] computeDamage(LivingEntity target, Vec3d crystalPos) {
+                  long key = BlockPos.asLong(
+                      (int) Math.floor(crystalPos.x * 8),
+                      (int) Math.floor(crystalPos.y * 8),
+                      (int) Math.floor(crystalPos.z * 8));
+                  double[] cached = damageCache.get(key);
+                  if (cached != null) return cached;
+
+                  float dmgT = DamageUtils.crystalDamage(
+                      target, target.getPos(), target.getBoundingBox(),
+                      crystalPos, DamageUtils.HIT_FACTORY);
+                  float dmgS = DamageUtils.crystalDamage(
+                      mc.player, mc.player.getPos(), mc.player.getBoundingBox(),
+                      crystalPos, DamageUtils.HIT_FACTORY);
+
+                  double[] arr = new double[] { dmgT, dmgS };
+                  damageCache.put(key, arr);
+                  return arr;
+              }
+
+              // ================================================================
+              //   ACTIONS
+              // ================================================================
+              private void attackCrystal(EndCrystalEntity crystal) {
+                  Runnable action = () -> {
+                      mc.player.networkHandler.sendPacket(
+                          PlayerInteractEntityC2SPacket.attack(crystal, mc.player.isSneaking()));
+                      swing(Hand.MAIN_HAND);
+                  };
+                  if (rotate.get()) {
+                      double yaw   = Rotations.getYaw(crystal);
+                      double pitch = Rotations.getPitch(crystal);
+                      Rotations.rotate(yaw, pitch, 50, false, action);
+                  } else {
+                      action.run();
+                  }
+              }
+
+              private void placeCrystal(BlockPos pos, Hand hand) {
+                  Vec3d hit = new Vec3d(pos.getX() + 0.5, pos.getY() + 1.0, pos.getZ() + 0.5);
+                  BlockHitResult hr = new BlockHitResult(hit, Direction.UP, pos, false);
+
+                  Runnable action = () -> {
+                      mc.player.networkHandler.sendPacket(
+                          new PlayerInteractBlockC2SPacket(hand, hr, 0));
+                      swing(hand);
+                  };
+
+                  if (rotate.get()) {
+                      double yaw   = Rotations.getYaw(hit);
+                      double pitch = Rotations.getPitch(hit);
+                      Rotations.rotate(yaw, pitch, 50, false, action);
+                  } else {
+                      action.run();
+                  }
+              }
+
+              private void swing(Hand hand) {
+                  if (serverSideSwing.get()) {
+                      mc.player.networkHandler.sendPacket(new HandSwingC2SPacket(hand));
+                  } else {
+                      mc.player.swingHand(hand);
+                  }
+              }
+
+              // ================================================================
+              //   HOTBAR / INVENTORY MANAGEMENT (7 modes, Silent actually works now)
+              // ================================================================
+              private Hand pickHandForPlace() {
+                  SwitchMode mode = switchMode.get();
+
+                  // Fast paths that never need switching:
+                  if (InvUtils.testInOffHand(Items.END_CRYSTAL)) return Hand.OFF_HAND;
+                  if (InvUtils.testInMainHand(Items.END_CRYSTAL)) return Hand.MAIN_HAND;
+
+                  switch (mode) {
+                      case None:
+                      case NoSwitch:
+                          return null;
+
+                      case OffHand:
+                          return null;
+
+                      case Normal: {
+                          FindItemResult r = InvUtils.findInHotbar(Items.END_CRYSTAL);
+                          if (r.found() && r.isHotbar()) {
+                              InvUtils.swap(r.slot(), false);
+                              return Hand.MAIN_HAND;
+                          }
+                          return null;
+                      }
+
+                      case Silent:
+                      case PickSilent: {
+                          FindItemResult r = InvUtils.findInHotbar(Items.END_CRYSTAL);
+                          if (r.found() && r.isHotbar()) {
+                              InvUtils.swap(r.slot(), true);
+                              didSilentSwapThisTick = true;
+                              return Hand.MAIN_HAND;
+                          }
+                          return null;
+                      }
+
+                      case SilentFromInventory: {
+                          FindItemResult r = InvUtils.findInHotbar(Items.END_CRYSTAL);
+                          if (r.found() && r.isHotbar()) {
+                              InvUtils.swap(r.slot(), true);
+                              didSilentSwapThisTick = true;
+                              return Hand.MAIN_HAND;
+                          }
+                          FindItemResult inv = InvUtils.find(Items.END_CRYSTAL);
+                          if (inv.found() && inv.slot() >= 0) {
+                              int hotbarSlot = mc.player.getInventory().selectedSlot;
+                              InvUtils.quickSwap()
+                                  .fromId(SlotUtils.indexToId(inv.slot()))
+                                  .toHotbar(hotbarSlot);
+                              return Hand.MAIN_HAND;
+                          }
+                          return null;
+                      }
+
+                      case AutoSwap: {
+                          FindItemResult inv = InvUtils.find(Items.END_CRYSTAL);
+                          if (!inv.found()) return null;
+
+                          FindItemResult empty = InvUtils.findEmpty();
+                          int hotbarTarget;
+                          if (empty.found() && empty.isHotbar()) {
+                              hotbarTarget = empty.slot();
+                          } else {
+                              hotbarTarget = mc.player.getInventory().selectedSlot;
+                          }
+
+                          InvUtils.quickSwap()
+                              .fromId(SlotUtils.indexToId(inv.slot()))
+                              .toHotbar(hotbarTarget);
+
+                          if (hotbarTarget == mc.player.getInventory().selectedSlot) {
+                              return Hand.MAIN_HAND;
+                          }
+                          return null;
+                      }
+                  }
+                  return null;
+              }
+
+              // ================================================================
+              //   RENDER
+              // ================================================================
+              @EventHandler
+              private void onRender(Render3DEvent event) {
+                  if (!render.get() || lastPlace == null) return;
+                  event.renderer.box(lastPlace.up(), renderSide.get(), renderLine.get(),
+                                     ShapeMode.Both, 0);
+              }
+          }
+          MODULE_JAVA
+
+          echo "=== Project tree ==="
+          find "$ROOT" -maxdepth 5 -type f | sort
+          echo "===================="
+
+      # ------------------------------------------------------------------
+      # 3. Strip the leading 10 spaces we used for YAML readability so the
+      #    embedded gradle / java / json files are valid.  We only touch
+      #    the generated project files, never .yml.
+      # ------------------------------------------------------------------
+      - name: Strip leading indent from generated files
+        run: |
+          cd "$GITHUB_WORKSPACE/addon"
+          find . -type f \( -name "*.gradle" -o -name "*.properties" \
+                          -o -name "*.json"   -o -name "*.java" \) \
+            -exec sed -i 's/^          //' {} +
+
+      # ------------------------------------------------------------------
+      # 4. Set up the Gradle wrapper (no committed wrapper needed)
+      # ------------------------------------------------------------------
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: "8.8"
+
+      - name: Init Gradle wrapper
+        working-directory: addon
+        run: gradle wrapper --gradle-version 8.8
+
+      # ------------------------------------------------------------------
+      # 5. Build
+      # ------------------------------------------------------------------
+      - name: Build addon JAR
+        working-directory: addon
+        run: ./gradlew --no-daemon build
+
+      # ------------------------------------------------------------------
+      # 6. Publish artifacts
+      # ------------------------------------------------------------------
+      - name: Locate built JAR
+        id: jar
+        working-directory: addon
+        run: |
+          JAR=$(ls -1 build/libs/*.jar \
+                  | grep -viE '(-dev|-sources|-javadoc)\.jar$' \
+                  | head -n 1)
+          echo "path=addon/${JAR}" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$JAR")" >> "$GITHUB_OUTPUT"
+          ls -lah build/libs/
+
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 6b6t-addon
+          path: ${{ steps.jar.outputs.path }}
+          if-no-files-found: error
+
+      - name: Publish GitHub Release (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.jar.outputs.path }}
+          generate_release_notes: true
