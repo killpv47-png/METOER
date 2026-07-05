@@ -1,0 +1,92 @@
+# ============================================================
+#  6b6t Addon — cpvp_killpv2 Crystal Aura
+#  GitHub Actions Build — Single File Pipeline
+#  Minecraft 1.21.1 | Fabric | Meteor Client
+# ============================================================
+
+name: "6b6t :: cpvp_killpv2 Build"
+
+on:
+  push:
+    branches: [ "master", "main" ]
+  pull_request:
+    branches: [ "master", "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: "Build & Release 6b6t Addon"
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ── 1. Checkout ──────────────────────────────────────────────────
+      - name: "Checkout Repository"
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # ── 2. Java 21 (Required for MC 1.21.1 / Fabric Loom 1.7+) ──────
+      - name: "Set up Java 21"
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "21"
+          cache: "gradle"
+
+      # ── 3. Gradle Setup ──────────────────────────────────────────────
+      - name: "Set up Gradle"
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: "8.8"
+          cache-read-only: false
+
+      # ── 4. Gradle Permission ─────────────────────────────────────────
+      - name: "Grant execute permission for Gradlew"
+        run: chmod +x gradlew
+
+      # ── 5. Build ─────────────────────────────────────────────────────
+      - name: "Build with Gradle"
+        run: ./gradlew build --no-daemon --stacktrace
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 6. Upload Artifact (برای دانلود از Actions tab) ─────────────
+      - name: "Upload Build Artifact"
+        uses: actions/upload-artifact@v4
+        with:
+          name: "6b6t-cpvp_killpv2-${{ github.sha }}"
+          path: |
+            build/libs/*.jar
+            !build/libs/*-sources.jar
+            !build/libs/*-dev.jar
+          retention-days: 30
+
+      # ── 7. Release (فقط روی push به master/main) ────────────────────
+      - name: "Release Dev Build"
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: "snapshot-${{ github.run_number }}"
+          name: "6b6t cpvp_killpv2 — Dev Build #${{ github.run_number }}"
+          prerelease: true
+          body: |
+            ## 🔴 6b6t — cpvp_killpv2 Crystal Aura
+            **ماژول:** `cpvp_killpv2`
+            **نسخه Minecraft:** `1.21.1`
+            **بیلد:** `#${{ github.run_number }}`
+            **کامیت:** `${{ github.sha }}`
+
+            ### ویژگی‌های این بیلد:
+            - ⚡ سرعت Place/Break بر اساس تیک (قابل تنظیم)
+            - 🎯 دقیق‌ترین موقعیت Crystal برای بیشترین دمیج
+            - 🔕 حالت Silent (برداشت از inventory بدون سوییچ هات‌بار)
+            - 📡 بهینه‌سازی برای پینگ بالا (High-Ping Optimized)
+            - 🛡️ Anti-Suicide داخلی
+            - 👥 سیستم Friends — بدون آسیب به فرند
+            - 🌈 رنگ رندر قابل تغییر
+            - 🎛️ همه موجودات و آپشن‌ها داخل یک گروه مجزا
+          files: |
+            build/libs/*.jar
