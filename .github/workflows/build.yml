@@ -51,7 +51,7 @@ jobs:
           minecraft       = "1.21.1"
           yarn-mappings   = "1.21.1+build.3"
           fabric-loader   = "0.16.9"
-          loom            = "1.7-SNAPSHOT"
+          loom            = "1.8-SNAPSHOT"
           meteor          = "0.5.9-SNAPSHOT"
 
           [libraries]
@@ -81,20 +81,19 @@ jobs:
       - name: Download Gradle Wrapper JAR
         run: |
           curl -fsSL \
-            "https://raw.githubusercontent.com/gradle/gradle/v8.8.0/gradle/wrapper/gradle-wrapper.jar" \
-            -o gradle/wrapper/gradle-wrapper.jar || \
-          wget -q \
-            "https://services.gradle.org/distributions/gradle-8.8-bin.zip" -O /tmp/gradle.zip && \
-          true
-
-          # Fallback: use gradle directly
-          if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
-            curl -fsSL https://github.com/gradle/gradle/raw/v8.8.0/gradle/wrapper/gradle-wrapper.jar \
+            "https://github.com/gradle/gradle/raw/v8.8.0/gradle/wrapper/gradle-wrapper.jar" \
+            -o gradle/wrapper/gradle-wrapper.jar
+          if [ ! -s gradle/wrapper/gradle-wrapper.jar ]; then
+            echo "Wrapper JAR download failed or empty, trying mirror..."
+            curl -fsSL \
+              "https://raw.githubusercontent.com/gradle/gradle/v8.8.0/gradle/wrapper/gradle-wrapper.jar" \
               -o gradle/wrapper/gradle-wrapper.jar
           fi
 
       # ─────────────────────────────────────────
       # 7. settings.gradle.kts
+      # FIX: Only declare pluginManagement here.
+      #      Dependency repos go in build.gradle.kts to avoid conflict.
       # ─────────────────────────────────────────
       - name: Write settings.gradle.kts
         run: |
@@ -103,16 +102,8 @@ jobs:
               repositories {
                   maven("https://maven.fabricmc.net/")
                   maven("https://maven.meteordev.org/snapshots")
-                  gradlePluginPortal()
-              }
-          }
-
-          dependencyResolutionManagement {
-              repositories {
-                  mavenCentral()
-                  maven("https://maven.fabricmc.net/")
-                  maven("https://maven.meteordev.org/snapshots")
                   maven("https://maven.meteordev.org/releases")
+                  gradlePluginPortal()
               }
           }
 
@@ -121,6 +112,8 @@ jobs:
 
       # ─────────────────────────────────────────
       # 8. build.gradle.kts
+      # FIX: Repositories defined here explicitly,
+      #      both snapshots AND releases for Meteor.
       # ─────────────────────────────────────────
       - name: Write build.gradle.kts
         run: |
@@ -134,16 +127,38 @@ jobs:
           version = "1.0.0"
           group = "dev.b6t"
 
+          repositories {
+              maven {
+                  name = "FabricMC"
+                  url = uri("https://maven.fabricmc.net/")
+              }
+              maven {
+                  name = "meteor-snapshots"
+                  url = uri("https://maven.meteordev.org/snapshots")
+              }
+              maven {
+                  name = "meteor-releases"
+                  url = uri("https://maven.meteordev.org/releases")
+              }
+              mavenCentral()
+          }
+
           java {
               sourceCompatibility = JavaVersion.VERSION_21
               targetCompatibility = JavaVersion.VERSION_21
+          }
+
+          configurations.all {
+              resolutionStrategy.cacheChangingModulesFor(0, "seconds")
           }
 
           dependencies {
               minecraft("com.mojang:minecraft:1.21.1")
               mappings("net.fabricmc:yarn:1.21.1+build.3:v2")
               modImplementation("net.fabricmc:fabric-loader:0.16.9")
-              modImplementation(libs.meteor.client)
+              modImplementation(libs.meteor.client) {
+                  isChanging = true
+              }
           }
 
           tasks.jar {
@@ -169,7 +184,7 @@ jobs:
               "meteor": ["dev.b6t.addon.Addon6b6t"]
             },
             "depends": {
-              "minecraft": "~1.21.1",
+              "minecraft": "~1.21",
               "meteor-client": "*"
             }
           }
@@ -216,13 +231,12 @@ jobs:
           import meteordevelopment.meteorclient.events.world.TickEvent;
           import meteordevelopment.meteorclient.renderer.ShapeMode;
           import meteordevelopment.meteorclient.settings.*;
+          import meteordevelopment.meteorclient.systems.modules.Categories;
           import meteordevelopment.meteorclient.systems.modules.Module;
           import meteordevelopment.meteorclient.utils.entity.EntityUtils;
           import meteordevelopment.meteorclient.utils.player.InvUtils;
-          import meteordevelopment.meteorclient.utils.player.PlayerUtils;
           import meteordevelopment.meteorclient.utils.player.Rotations;
           import meteordevelopment.meteorclient.utils.render.color.SettingColor;
-          import meteordevelopment.meteorclient.utils.world.BlockUtils;
           import meteordevelopment.orbit.EventHandler;
           import net.minecraft.block.Blocks;
           import net.minecraft.entity.Entity;
@@ -239,7 +253,6 @@ jobs:
           import net.minecraft.util.math.Vec3d;
 
           import java.util.ArrayList;
-          import java.util.Comparator;
           import java.util.List;
 
           public class CpvpKillPv2 extends Module {
@@ -253,7 +266,6 @@ jobs:
               private final SettingGroup sgRender   = settings.createGroup("Render");
 
               // ── General Settings ─────────────────────────────────────────────────
-
               private final Setting<Double> targetRange = sgGeneral.add(new DoubleSetting.Builder()
                   .name("target-range")
                   .description("Range to search for targets (blocks).")
@@ -264,19 +276,19 @@ jobs:
 
               private final Setting<Boolean> friendsFilter = sgGeneral.add(new BoolSetting.Builder()
                   .name("ignore-friends")
-                  .description("Remove friends from the target list (friends-remove tick).")
+                  .description("Remove friends from the target list.")
                   .defaultValue(true)
                   .build());
 
               private final Setting<Boolean> silentMode = sgGeneral.add(new BoolSetting.Builder()
                   .name("silent-mode")
-                  .description("Place crystals even when not in hotbar. Pulls from inventory automatically.")
+                  .description("Pull crystals from inventory automatically.")
                   .defaultValue(true)
                   .build());
 
               private final Setting<Boolean> antiSelfDamage = sgGeneral.add(new BoolSetting.Builder()
                   .name("anti-self-damage")
-                  .description("Never place/break if you would take lethal or heavy self-damage.")
+                  .description("Never place/break if you would take lethal self-damage.")
                   .defaultValue(true)
                   .build());
 
@@ -296,10 +308,9 @@ jobs:
                   .build());
 
               // ── Place Settings ────────────────────────────────────────────────────
-
               private final Setting<Integer> placeDelay = sgPlace.add(new IntSetting.Builder()
                   .name("place-delay-ticks")
-                  .description("Delay between crystal placements in game ticks (1 tick = 50ms).")
+                  .description("Delay between crystal placements in ticks.")
                   .defaultValue(0)
                   .min(0).max(20)
                   .sliderRange(0, 10)
@@ -323,7 +334,7 @@ jobs:
 
               private final Setting<Boolean> placeThruWalls = sgPlace.add(new BoolSetting.Builder()
                   .name("place-thru-walls")
-                  .description("Allow placing crystals through walls (high-ping optimized).")
+                  .description("Allow placing crystals through walls.")
                   .defaultValue(true)
                   .build());
 
@@ -342,10 +353,9 @@ jobs:
                   .build());
 
               // ── Break Settings ────────────────────────────────────────────────────
-
               private final Setting<Integer> breakDelay = sgBreak.add(new IntSetting.Builder()
                   .name("break-delay-ticks")
-                  .description("Delay between crystal breaks in game ticks (0 = fastest, block-out speed).")
+                  .description("Delay between crystal breaks in ticks.")
                   .defaultValue(0)
                   .min(0).max(20)
                   .sliderRange(0, 10)
@@ -383,12 +393,11 @@ jobs:
 
               private final Setting<Boolean> instantBreak = sgBreak.add(new BoolSetting.Builder()
                   .name("instant-break")
-                  .description("Break the crystal the same tick it is placed (faster than block-out).")
+                  .description("Break the crystal the same tick it is placed.")
                   .defaultValue(true)
                   .build());
 
               // ── Safety Settings ───────────────────────────────────────────────────
-
               private final Setting<Boolean> pauseOnEat = sgSafety.add(new BoolSetting.Builder()
                   .name("pause-on-eat")
                   .description("Pause crystal aura while eating.")
@@ -403,12 +412,11 @@ jobs:
 
               private final Setting<Boolean> onlyAbove = sgSafety.add(new BoolSetting.Builder()
                   .name("only-above-obsidian")
-                  .description("Only place on Obsidian/Bedrock (prevents wasting crystals).")
+                  .description("Only place on Obsidian/Bedrock/Crying Obsidian.")
                   .defaultValue(true)
                   .build());
 
               // ── Entity Target Filters ─────────────────────────────────────────────
-
               private final Setting<Boolean> targetPlayers = sgEntities.add(new BoolSetting.Builder()
                   .name("target-players")
                   .description("Target other players.")
@@ -428,7 +436,6 @@ jobs:
                   .build());
 
               // ── Render Settings ───────────────────────────────────────────────────
-
               private final Setting<Boolean> renderPlace = sgRender.add(new BoolSetting.Builder()
                   .name("render-place-pos")
                   .description("Render the position where crystals will be placed.")
@@ -483,7 +490,7 @@ jobs:
 
               public CpvpKillPv2() {
                   super(
-                      new Addon6b6tCategory(),
+                      Categories.COMBAT,
                       "cpvp-killpv2",
                       "High-performance Crystal PVP for Anarchy servers. Optimized for high ping."
                   );
@@ -506,11 +513,10 @@ jobs:
                   PlayerEntity target = findBestTarget();
                   if (target == null) return;
 
-                  // ── Ensure crystal in hand (silent-mode: use inventory slot) ──
                   boolean hasCrystal = ensureCrystal();
                   if (!hasCrystal) return;
 
-                  // ── Break ──
+                  // Break
                   if (breakTimer <= 0) {
                       bestBreakTarget = findBestBreakTarget(target);
                       if (bestBreakTarget != null) {
@@ -521,13 +527,12 @@ jobs:
                       breakTimer--;
                   }
 
-                  // ── Place ──
+                  // Place
                   if (placeTimer <= 0) {
                       bestPlacePos = findBestPlacePos(target);
                       if (bestPlacePos != null) {
                           placeCrystal(bestPlacePos);
                           if (instantBreak.get()) {
-                              // Immediately try breaking the crystal we just placed
                               tickBreakInstant(target);
                           }
                           placeTimer = placeDelay.get();
@@ -557,7 +562,6 @@ jobs:
               //  HELPERS
               // ══════════════════════════════════════════════════════════════════════
 
-              /** Returns true if eating/drinking and pauses are enabled. */
               private boolean isPaused() {
                   if (mc.player == null) return false;
                   boolean eating = mc.player.isUsingItem() &&
@@ -567,11 +571,9 @@ jobs:
                   return (pauseOnEat.get() && eating) || (pauseOnDrink.get() && drinking);
               }
 
-              /** Finds the nearest valid player target. */
               private PlayerEntity findBestTarget() {
                   PlayerEntity best = null;
                   double bestDist = Double.MAX_VALUE;
-
                   for (Entity e : mc.world.getEntities()) {
                       if (!isValidTarget(e)) continue;
                       PlayerEntity p = (PlayerEntity) e;
@@ -584,35 +586,27 @@ jobs:
                   return best;
               }
 
-              /** Validates an entity as a legal target. */
               private boolean isValidTarget(Entity e) {
                   if (e == mc.player) return false;
-                  if (!(e instanceof PlayerEntity)) {
-                      if (!targetMobs.get() && !targetAnimals.get()) return false;
-                  }
                   if (e instanceof PlayerEntity p) {
                       if (!targetPlayers.get()) return false;
                       if (friendsFilter.get() && EntityUtils.isFriend(p)) return false;
+                  } else {
+                      if (!targetMobs.get() && !targetAnimals.get()) return false;
                   }
                   return e.isAlive();
               }
 
-              /** Ensures an End Crystal is in hand. Silent-mode: temporarily switch slots. */
               private boolean ensureCrystal() {
-                  // Check if already holding a crystal
                   if (mc.player.getMainHandStack().getItem() == Items.END_CRYSTAL) return true;
                   if (mc.player.getOffHandStack().getItem() == Items.END_CRYSTAL) return true;
-
                   if (!silentMode.get()) return false;
 
-                  // Try to find crystal in hotbar first, then inventory
                   InvUtils.FindItemResult result = InvUtils.findInHotbar(Items.END_CRYSTAL);
                   if (result.found()) {
                       InvUtils.swap(result.slot(), false);
                       return true;
                   }
-
-                  // Silent: pull from inventory
                   result = InvUtils.find(Items.END_CRYSTAL);
                   if (result.found()) {
                       InvUtils.move().from(result.slot()).toHotbar(mc.player.getInventory().selectedSlot);
@@ -621,17 +615,9 @@ jobs:
                   return false;
               }
 
-              /**
-               * Finds the best position to place a crystal that:
-               *  1. Deals >= minDamageToPlace to target
-               *  2. Deals <= maxSelfDamage to self (if antiSelfDamage on)
-               *  3. Is Obsidian or Bedrock (if onlyAbove on)
-               *  4. Maximises damage to target (smartPlace)
-               */
               private BlockPos findBestPlacePos(PlayerEntity target) {
                   Vec3d eyePos = mc.player.getEyePos();
                   List<BlockPos> candidates = new ArrayList<>();
-
                   int range = (int) Math.ceil(placeRange.get());
                   BlockPos origin = mc.player.getBlockPos();
 
@@ -639,20 +625,13 @@ jobs:
                       for (int y = -range; y <= range; y++) {
                           for (int z = -range; z <= range; z++) {
                               BlockPos pos = origin.add(x, y, z);
-
-                              // Must be valid base block
                               if (!isValidBase(pos)) continue;
-
-                              // The block above must be air/replaceable
                               if (!mc.world.getBlockState(pos.up()).isAir()) continue;
-                              // Two blocks above also must be clear (crystal is 2 tall)
                               if (!mc.world.getBlockState(pos.up(2)).isAir()) continue;
 
                               Vec3d crystalPos = Vec3d.ofCenter(pos.up());
                               double dist = eyePos.distanceTo(crystalPos);
-
-                              boolean throughWall = !mc.world.isDirectionSolid(pos.up(),
-                                  mc.player, Direction.UP);
+                              boolean throughWall = !mc.world.isDirectionSolid(pos.up(), mc.player, Direction.UP);
 
                               if (throughWall && !placeThruWalls.get()) continue;
                               double maxR = throughWall ? placeWallRange.get() : placeRange.get();
@@ -665,7 +644,6 @@ jobs:
 
                   if (candidates.isEmpty()) return null;
 
-                  // Score each candidate
                   BlockPos best = null;
                   double bestScore = -Double.MAX_VALUE;
 
@@ -683,11 +661,9 @@ jobs:
                           best = pos;
                       }
                   }
-
                   return best;
               }
 
-              /** Is this block a valid base for crystal placement? */
               private boolean isValidBase(BlockPos pos) {
                   var state = mc.world.getBlockState(pos);
                   if (onlyAbove.get()) {
@@ -698,7 +674,6 @@ jobs:
                   return !state.isAir() && state.isSolidBlock(mc.world, pos);
               }
 
-              /** Finds the best crystal to break (deals max damage to target). */
               private EndCrystalEntity findBestBreakTarget(PlayerEntity target) {
                   EndCrystalEntity best = null;
                   double bestDmg = -1;
@@ -707,9 +682,7 @@ jobs:
                       if (!(e instanceof EndCrystalEntity crystal)) continue;
                       if (!crystal.isAlive()) continue;
 
-                      Vec3d crystalPos = crystal.getPos().add(0, 1, 0);
                       double dist = mc.player.getEyePos().distanceTo(crystal.getPos());
-
                       boolean throughWall = !mc.world.isDirectionSolid(
                           crystal.getBlockPos(), mc.player, Direction.UP);
 
@@ -731,7 +704,6 @@ jobs:
                   return best;
               }
 
-              /** Sends attack packet to break a crystal. */
               private void attackCrystal(EndCrystalEntity crystal) {
                   if (rotate.get()) {
                       Rotations.rotate(
@@ -753,13 +725,9 @@ jobs:
                   );
               }
 
-              /** Places a crystal at a given BlockPos. */
               private void placeCrystal(BlockPos pos) {
                   BlockHitResult hitResult = new BlockHitResult(
-                      Vec3d.ofCenter(pos),
-                      Direction.UP,
-                      pos,
-                      false
+                      Vec3d.ofCenter(pos), Direction.UP, pos, false
                   );
                   Hand hand = mc.player.getMainHandStack().getItem() == Items.END_CRYSTAL
                       ? Hand.MAIN_HAND : Hand.OFF_HAND;
@@ -775,9 +743,7 @@ jobs:
                   }
               }
 
-              /** Immediately tries to break the crystal just placed (instant-break). */
               private void tickBreakInstant(PlayerEntity target) {
-                  // Search for the crystal we just placed within 1 block of bestPlacePos
                   if (bestPlacePos == null) return;
                   Vec3d center = Vec3d.ofCenter(bestPlacePos.up());
                   mc.world.getEntities().forEach(e -> {
@@ -788,83 +754,44 @@ jobs:
                   });
               }
 
-              // ══════════════════════════════════════════════════════════════════════
-              //  Crystal Damage Calculator (Approximate — matches vanilla explosion)
-              // ══════════════════════════════════════════════════════════════════════
+              // ── Crystal Damage Calculator ─────────────────────────────────────────
               private static class CrystalCalc {
-                  /**
-                   * Approximates end-crystal explosion damage to an entity.
-                   * Crystal explosion power = 6f
-                   * Formula mirrors DamageUtil.getExplosionDamage
-                   */
                   static double damage(net.minecraft.client.MinecraftClient mc,
-                                       Vec3d crystalPos, net.minecraft.entity.LivingEntity entity) {
+                                       Vec3d crystalPos,
+                                       net.minecraft.entity.LivingEntity entity) {
                       if (entity == null || mc.world == null) return 0;
-
-                      double dist = crystalPos.distanceTo(entity.getPos().add(0, entity.getHeight() / 2, 0));
-                      double maxDist = 12.0; // crystal power * 2
+                      double dist = crystalPos.distanceTo(
+                          entity.getPos().add(0, entity.getHeight() / 2.0, 0));
+                      double maxDist = 12.0;
                       if (dist > maxDist) return 0;
 
                       double exposure = 1.0 - (dist / maxDist);
                       double baseDamage = (exposure * exposure + exposure) / 2.0 * 7.0 * 6.0 + 1;
 
-                      // Armor / blast protection reduction (simplified)
                       float armor = entity.getArmor();
-                      double afterArmor = baseDamage * (1.0 - Math.min(20.0, Math.max(armor / 5.0,
-                          armor - baseDamage / (2.0 + 1))) / 25.0);
+                      double afterArmor = baseDamage * (1.0 - Math.min(20.0,
+                          Math.max(armor / 5.0, armor - baseDamage / 3.0)) / 25.0);
 
                       return Math.max(0, afterArmor);
                   }
-              }
-
-              // ── Custom Category ──────────────────────────────────────────────────
-              public static class Addon6b6tCategory
-                  extends meteordevelopment.meteorclient.systems.modules.Categories {
-                  // Uses built-in Combat category
-                  public Addon6b6tCategory() {}
               }
           }
           JAVA_EOF
 
       # ─────────────────────────────────────────
-      # 12. Fix Category — use built-in Combat
-      # ─────────────────────────────────────────
-      - name: Fix Module Category Reference
-        run: |
-          # Patch the module to use Meteor's built-in Categories.COMBAT
-          sed -i 's/new Addon6b6tCategory()/meteordevelopment.meteorclient.systems.modules.Categories.COMBAT/' \
-            src/main/java/dev/b6t/addon/modules/CpvpKillPv2.java
-          # Remove the inner Addon6b6tCategory class entirely
-          python3 - << 'PY_EOF'
-          import re
-          with open("src/main/java/dev/b6t/addon/modules/CpvpKillPv2.java", "r") as f:
-              content = f.read()
-          # Remove the inner static class
-          content = re.sub(
-              r'// ── Custom Category ──.*?^\s*\}\s*\n',
-              '',
-              content,
-              flags=re.DOTALL | re.MULTILINE
-          )
-          with open("src/main/java/dev/b6t/addon/modules/CpvpKillPv2.java", "w") as f:
-              f.write(content)
-          print("Patched successfully")
-          PY_EOF
-
-      # ─────────────────────────────────────────
-      # 13. gradlew script
+      # 12. gradlew script
       # ─────────────────────────────────────────
       - name: Write gradlew
         run: |
           cat > gradlew << 'SH_EOF'
           #!/bin/sh
-          DIRNAME="$(dirname "$0")"
+          DIRNAME="$(cd "$(dirname "$0")" && pwd)"
           exec java -jar "$DIRNAME/gradle/wrapper/gradle-wrapper.jar" "$@"
           SH_EOF
           chmod +x gradlew
 
       # ─────────────────────────────────────────
-      # 14. Setup Gradle (caching)
+      # 13. Setup Gradle (caching)
       # ─────────────────────────────────────────
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
@@ -872,13 +799,13 @@ jobs:
           gradle-version: '8.8'
 
       # ─────────────────────────────────────────
-      # 15. Build
+      # 14. Build
       # ─────────────────────────────────────────
       - name: Build with Gradle
-        run: gradle build --no-daemon --stacktrace
+        run: gradle build --no-daemon --stacktrace --refresh-dependencies
 
       # ─────────────────────────────────────────
-      # 16. Upload artifact
+      # 15. Upload artifact
       # ─────────────────────────────────────────
       - name: Upload JAR
         uses: actions/upload-artifact@v4
@@ -888,7 +815,7 @@ jobs:
           retention-days: 30
 
       # ─────────────────────────────────────────
-      # 17. Release (on push to main)
+      # 16. Release (on push to main)
       # ─────────────────────────────────────────
       - name: Create Release
         if: github.ref == 'refs/heads/main'
