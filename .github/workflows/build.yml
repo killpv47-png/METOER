@@ -43,23 +43,25 @@ jobs:
 
       # ─────────────────────────────────────────
       # 4. gradle/libs.versions.toml
-      # FIX: Plugin ID must be "net.fabricmc.fabric-loom"
-      # FIX: mappings entry added properly
+      # FIX: Added jdk version field (required by build.gradle.kts toolchain)
+      # FIX: yarn-mappings corrected to 1.21.1+build.3
       # ─────────────────────────────────────────
       - name: Write libs.versions.toml
         run: |
           cat > gradle/libs.versions.toml << 'TOML_EOF'
           [versions]
-          minecraft       = "1.21.1"
-          yarn-mappings   = "1.21.1+build.3"
-          fabric-loader   = "0.16.9"
-          loom            = "1.8-SNAPSHOT"
-          meteor          = "0.5.9-SNAPSHOT"
+          mod-version      = "1.0.0"
+          jdk              = "21"
+          minecraft        = "1.21.1"
+          yarn-mappings    = "1.21.1+build.3"
+          fabric-loader    = "0.16.9"
+          loom             = "1.8-SNAPSHOT"
+          meteor           = "0.5.9-SNAPSHOT"
 
           [libraries]
-          minecraft     = { module = "com.mojang:minecraft",        version.ref = "minecraft" }
-          yarn          = { module = "net.fabricmc:yarn",           version.ref = "yarn-mappings" }
-          fabric-loader = { module = "net.fabricmc:fabric-loader",  version.ref = "fabric-loader" }
+          minecraft     = { module = "com.mojang:minecraft",            version.ref = "minecraft" }
+          yarn          = { module = "net.fabricmc:yarn",               version.ref = "yarn-mappings" }
+          fabric-loader = { module = "net.fabricmc:fabric-loader",      version.ref = "fabric-loader" }
           meteor-client = { module = "meteordevelopment:meteor-client", version.ref = "meteor" }
 
           [plugins]
@@ -92,18 +94,25 @@ jobs:
 
       # ─────────────────────────────────────────
       # 7. settings.gradle.kts
-      # FIX: pluginManagement must include fabricmc maven
+      # FIX: Removed meteordev from pluginManagement (loom is only on fabricmc maven)
+      # FIX: Added foojay-resolver-convention plugin (required by modern loom)
       # ─────────────────────────────────────────
       - name: Write settings.gradle.kts
         run: |
           cat > settings.gradle.kts << 'SETTINGS_EOF'
           pluginManagement {
               repositories {
-                  maven("https://maven.fabricmc.net/")
-                  maven("https://maven.meteordev.org/snapshots")
-                  maven("https://maven.meteordev.org/releases")
+                  maven {
+                      name = "Fabric"
+                      url = uri("https://maven.fabricmc.net/")
+                  }
+                  mavenCentral()
                   gradlePluginPortal()
               }
+          }
+
+          plugins {
+              id("org.gradle.toolchains.foojay-resolver-convention") version "0.8.0"
           }
 
           rootProject.name = "6b6t"
@@ -111,72 +120,91 @@ jobs:
 
       # ─────────────────────────────────────────
       # 8. build.gradle.kts
-      # FIX: use alias(libs.plugins.fabric.loom) — dot not dash
-      # FIX: mappings() call uses libs.yarn
-      # FIX: modImplementation for fabric-loader correct
+      # FIX: Use implementation() not modImplementation() for fabric-loader & meteor
+      #      (Meteor SNAPSHOT ships as a fat jar / compile dependency via loom)
+      # FIX: Use java toolchain block (requires jdk version in libs.versions.toml)
+      # FIX: mappings() via libs.yarn (correct loom DSL)
+      # FIX: processResources expands fabric.mod.json variables
       # ─────────────────────────────────────────
       - name: Write build.gradle.kts
         run: |
           cat > build.gradle.kts << 'BUILD_EOF'
           plugins {
               alias(libs.plugins.fabric.loom)
-              `java`
           }
 
-          base.archivesName = "6b6t"
-          version = "1.0.0"
-          group = "dev.b6t"
+          base {
+              archivesName = properties["archives_base_name"] as String
+              version = libs.versions.mod.version.get()
+              group = properties["maven_group"] as String
+          }
 
           repositories {
               maven {
-                  name = "FabricMC"
-                  url = uri("https://maven.fabricmc.net/")
-              }
-              maven {
-                  name = "meteor-snapshots"
-                  url = uri("https://maven.meteordev.org/snapshots")
-              }
-              maven {
-                  name = "meteor-releases"
+                  name = "meteor-maven"
                   url = uri("https://maven.meteordev.org/releases")
               }
-              mavenCentral()
-          }
-
-          java {
-              sourceCompatibility = JavaVersion.VERSION_21
-              targetCompatibility = JavaVersion.VERSION_21
-          }
-
-          configurations.all {
-              resolutionStrategy.cacheChangingModulesFor(0, "seconds")
+              maven {
+                  name = "meteor-maven-snapshots"
+                  url = uri("https://maven.meteordev.org/snapshots")
+              }
           }
 
           dependencies {
+              // Fabric loom DSL
               minecraft(libs.minecraft)
               mappings(libs.yarn)
               modImplementation(libs.fabric.loader)
-              modImplementation(libs.meteor.client) {
-                  isChanging = true
+
+              // Meteor Client (shipped as a compiled fat jar)
+              implementation(libs.meteor.client)
+          }
+
+          java {
+              toolchain {
+                  languageVersion.set(JavaLanguageVersion.of(libs.versions.jdk.get().toInt()))
               }
           }
 
-          tasks.jar {
-              from("LICENSE") { rename { "${it}_6b6t" } }
+          tasks {
+              processResources {
+                  val map = mapOf(
+                      "version"          to project.version,
+                      "minecraft_version" to libs.versions.minecraft.get(),
+                      "jdk_version"      to libs.versions.jdk.get()
+                  )
+                  inputs.properties(map)
+                  filesMatching("fabric.mod.json") { expand(map) }
+              }
+
+              jar {
+                  from("LICENSE") {
+                      rename { "${it}_6b6t" }
+                  }
+              }
           }
           BUILD_EOF
 
       # ─────────────────────────────────────────
       # 9. gradle.properties
+      # FIX: Added maven_group and archives_base_name (required by build.gradle.kts)
       # ─────────────────────────────────────────
       - name: Write gradle.properties
         run: |
           cat > gradle.properties << 'PROPS_EOF'
           org.gradle.jvmargs=-Xmx2G
+          org.gradle.parallel=true
+          org.gradle.caching=true
+          org.gradle.configuration-cache=false
+
+          maven_group=dev.b6t
+          archives_base_name=6b6t
           PROPS_EOF
 
       # ─────────────────────────────────────────
       # 10. fabric.mod.json
+      # FIX: Use ${version} placeholder so processResources can expand it
+      # FIX: minecraft version uses ~1.21 range
       # ─────────────────────────────────────────
       - name: Write fabric.mod.json
         run: |
@@ -184,7 +212,7 @@ jobs:
           {
             "schemaVersion": 1,
             "id": "6b6t",
-            "version": "1.0.0",
+            "version": "${version}",
             "name": "6b6t",
             "description": "Crystal PVP Addon for Anarchy Servers",
             "authors": ["6b6t"],
@@ -229,10 +257,6 @@ jobs:
 
       # ─────────────────────────────────────────
       # 12. CpvpKillPv2 Module
-      # FIX: Removed EntityUtils.isFriend (doesn't exist in Meteor API)
-      # FIX: Removed mc.world.isDirectionSolid (doesn't exist in MC API)
-      # FIX: Fixed PlayerInteractEntityC2SPacket usage for 1.21.1
-      # FIX: Removed AUTHORS field (not required by MeteorAddon)
       # ─────────────────────────────────────────
       - name: Write CpvpKillPv2 Module
         run: |
@@ -269,7 +293,6 @@ jobs:
 
           public class CpvpKillPv2 extends Module {
 
-              // ── Category Groups ──────────────────────────────────────────────────
               private final SettingGroup sgGeneral  = settings.createGroup("General");
               private final SettingGroup sgPlace    = settings.createGroup("Place");
               private final SettingGroup sgBreak    = settings.createGroup("Break");
@@ -277,217 +300,131 @@ jobs:
               private final SettingGroup sgEntities = settings.createGroup("Target Entities");
               private final SettingGroup sgRender   = settings.createGroup("Render");
 
-              // ── General Settings ─────────────────────────────────────────────────
               private final Setting<Double> targetRange = sgGeneral.add(new DoubleSetting.Builder()
-                  .name("target-range")
-                  .description("Range to search for targets (blocks).")
-                  .defaultValue(5.0)
-                  .min(1.0).max(10.0)
-                  .sliderRange(1.0, 10.0)
-                  .build());
+                  .name("target-range").description("Range to search for targets (blocks).")
+                  .defaultValue(5.0).min(1.0).max(10.0).sliderRange(1.0, 10.0).build());
 
               private final Setting<Boolean> friendsFilter = sgGeneral.add(new BoolSetting.Builder()
-                  .name("ignore-friends")
-                  .description("Remove friends from the target list.")
-                  .defaultValue(true)
-                  .build());
+                  .name("ignore-friends").description("Remove friends from the target list.")
+                  .defaultValue(true).build());
 
               private final Setting<Boolean> silentMode = sgGeneral.add(new BoolSetting.Builder()
-                  .name("silent-mode")
-                  .description("Pull crystals from inventory automatically.")
-                  .defaultValue(true)
-                  .build());
+                  .name("silent-mode").description("Pull crystals from inventory automatically.")
+                  .defaultValue(true).build());
 
               private final Setting<Boolean> antiSelfDamage = sgGeneral.add(new BoolSetting.Builder()
-                  .name("anti-self-damage")
-                  .description("Never place/break if you would take lethal self-damage.")
-                  .defaultValue(true)
-                  .build());
+                  .name("anti-self-damage").description("Never place/break if you would take lethal self-damage.")
+                  .defaultValue(true).build());
 
               private final Setting<Double> selfDamageMax = sgGeneral.add(new DoubleSetting.Builder()
-                  .name("max-self-damage")
-                  .description("Maximum self-damage allowed before skipping placement (HP).")
-                  .defaultValue(6.0)
-                  .min(0.0).max(36.0)
-                  .sliderRange(0.0, 20.0)
-                  .visible(antiSelfDamage::get)
-                  .build());
+                  .name("max-self-damage").description("Maximum self-damage allowed (HP).")
+                  .defaultValue(6.0).min(0.0).max(36.0).sliderRange(0.0, 20.0)
+                  .visible(antiSelfDamage::get).build());
 
               private final Setting<Boolean> rotate = sgGeneral.add(new BoolSetting.Builder()
-                  .name("rotate")
-                  .description("Rotate silently to crystal placement position.")
-                  .defaultValue(true)
-                  .build());
+                  .name("rotate").description("Rotate silently to crystal placement position.")
+                  .defaultValue(true).build());
 
-              // ── Place Settings ────────────────────────────────────────────────────
               private final Setting<Integer> placeDelay = sgPlace.add(new IntSetting.Builder()
-                  .name("place-delay-ticks")
-                  .description("Delay between crystal placements in ticks.")
-                  .defaultValue(0)
-                  .min(0).max(20)
-                  .sliderRange(0, 10)
-                  .build());
+                  .name("place-delay-ticks").description("Delay between crystal placements in ticks.")
+                  .defaultValue(0).min(0).max(20).sliderRange(0, 10).build());
 
               private final Setting<Double> placeRange = sgPlace.add(new DoubleSetting.Builder()
-                  .name("place-range")
-                  .description("Maximum distance to place a crystal (blocks).")
-                  .defaultValue(4.5)
-                  .min(1.0).max(6.0)
-                  .sliderRange(1.0, 6.0)
-                  .build());
+                  .name("place-range").description("Maximum distance to place a crystal (blocks).")
+                  .defaultValue(4.5).min(1.0).max(6.0).sliderRange(1.0, 6.0).build());
 
               private final Setting<Double> placeWallRange = sgPlace.add(new DoubleSetting.Builder()
-                  .name("place-wall-range")
-                  .description("Max range when placing through walls/blocks.")
-                  .defaultValue(3.0)
-                  .min(0.5).max(6.0)
-                  .sliderRange(0.5, 5.0)
-                  .build());
+                  .name("place-wall-range").description("Max range when placing through walls/blocks.")
+                  .defaultValue(3.0).min(0.5).max(6.0).sliderRange(0.5, 5.0).build());
 
               private final Setting<Boolean> placeThruWalls = sgPlace.add(new BoolSetting.Builder()
-                  .name("place-thru-walls")
-                  .description("Allow placing crystals through walls.")
-                  .defaultValue(true)
-                  .build());
+                  .name("place-thru-walls").description("Allow placing crystals through walls.")
+                  .defaultValue(true).build());
 
               private final Setting<Double> minDamageToPlace = sgPlace.add(new DoubleSetting.Builder()
-                  .name("min-place-damage")
-                  .description("Minimum damage the crystal must deal to target before placing.")
-                  .defaultValue(5.0)
-                  .min(0.0).max(36.0)
-                  .sliderRange(0.0, 20.0)
-                  .build());
+                  .name("min-place-damage").description("Minimum damage the crystal must deal to target before placing.")
+                  .defaultValue(5.0).min(0.0).max(36.0).sliderRange(0.0, 20.0).build());
 
-              // ── Break Settings ────────────────────────────────────────────────────
               private final Setting<Integer> breakDelay = sgBreak.add(new IntSetting.Builder()
-                  .name("break-delay-ticks")
-                  .description("Delay between crystal breaks in ticks.")
-                  .defaultValue(0)
-                  .min(0).max(20)
-                  .sliderRange(0, 10)
-                  .build());
+                  .name("break-delay-ticks").description("Delay between crystal breaks in ticks.")
+                  .defaultValue(0).min(0).max(20).sliderRange(0, 10).build());
 
               private final Setting<Double> breakRange = sgBreak.add(new DoubleSetting.Builder()
-                  .name("break-range")
-                  .description("Maximum distance to attack/break a crystal (blocks).")
-                  .defaultValue(5.0)
-                  .min(1.0).max(6.0)
-                  .sliderRange(1.0, 6.0)
-                  .build());
+                  .name("break-range").description("Maximum distance to attack/break a crystal (blocks).")
+                  .defaultValue(5.0).min(1.0).max(6.0).sliderRange(1.0, 6.0).build());
 
               private final Setting<Double> breakWallRange = sgBreak.add(new DoubleSetting.Builder()
-                  .name("break-wall-range")
-                  .description("Max break range through walls.")
-                  .defaultValue(3.0)
-                  .min(0.5).max(6.0)
-                  .sliderRange(0.5, 5.0)
-                  .build());
+                  .name("break-wall-range").description("Max break range through walls.")
+                  .defaultValue(3.0).min(0.5).max(6.0).sliderRange(0.5, 5.0).build());
 
               private final Setting<Boolean> breakThruWalls = sgBreak.add(new BoolSetting.Builder()
-                  .name("break-thru-walls")
-                  .description("Break crystals through walls.")
-                  .defaultValue(true)
-                  .build());
+                  .name("break-thru-walls").description("Break crystals through walls.")
+                  .defaultValue(true).build());
 
               private final Setting<Double> minDamageToBreak = sgBreak.add(new DoubleSetting.Builder()
-                  .name("min-break-damage")
-                  .description("Minimum damage crystal must deal before breaking it.")
-                  .defaultValue(4.0)
-                  .min(0.0).max(36.0)
-                  .sliderRange(0.0, 20.0)
-                  .build());
+                  .name("min-break-damage").description("Minimum damage crystal must deal before breaking it.")
+                  .defaultValue(4.0).min(0.0).max(36.0).sliderRange(0.0, 20.0).build());
 
               private final Setting<Boolean> instantBreak = sgBreak.add(new BoolSetting.Builder()
-                  .name("instant-break")
-                  .description("Break the crystal the same tick it is placed.")
-                  .defaultValue(true)
-                  .build());
+                  .name("instant-break").description("Break the crystal the same tick it is placed.")
+                  .defaultValue(true).build());
 
-              // ── Safety Settings ───────────────────────────────────────────────────
               private final Setting<Boolean> pauseOnEat = sgSafety.add(new BoolSetting.Builder()
-                  .name("pause-on-eat")
-                  .description("Pause crystal aura while eating.")
-                  .defaultValue(true)
-                  .build());
+                  .name("pause-on-eat").description("Pause crystal aura while eating.")
+                  .defaultValue(true).build());
 
               private final Setting<Boolean> pauseOnDrink = sgSafety.add(new BoolSetting.Builder()
-                  .name("pause-on-drink")
-                  .description("Pause crystal aura while drinking potions.")
-                  .defaultValue(true)
-                  .build());
+                  .name("pause-on-drink").description("Pause crystal aura while drinking potions.")
+                  .defaultValue(true).build());
 
               private final Setting<Boolean> onlyAbove = sgSafety.add(new BoolSetting.Builder()
-                  .name("only-above-obsidian")
-                  .description("Only place on Obsidian/Bedrock/Crying Obsidian.")
-                  .defaultValue(true)
-                  .build());
+                  .name("only-above-obsidian").description("Only place on Obsidian/Bedrock/Crying Obsidian.")
+                  .defaultValue(true).build());
 
-              // ── Entity Target Filters ─────────────────────────────────────────────
               private final Setting<Boolean> targetPlayers = sgEntities.add(new BoolSetting.Builder()
-                  .name("target-players")
-                  .description("Target other players.")
-                  .defaultValue(true)
-                  .build());
+                  .name("target-players").description("Target other players.")
+                  .defaultValue(true).build());
 
-              // ── Render Settings ───────────────────────────────────────────────────
               private final Setting<Boolean> renderPlace = sgRender.add(new BoolSetting.Builder()
-                  .name("render-place-pos")
-                  .description("Render the position where crystals will be placed.")
-                  .defaultValue(true)
-                  .build());
+                  .name("render-place-pos").description("Render the position where crystals will be placed.")
+                  .defaultValue(true).build());
 
               private final Setting<SettingColor> placeColor = sgRender.add(new ColorSetting.Builder()
-                  .name("place-color")
-                  .description("Color of the placement indicator.")
+                  .name("place-color").description("Color of the placement indicator.")
                   .defaultValue(new SettingColor(0, 255, 100, 80))
-                  .visible(renderPlace::get)
-                  .build());
+                  .visible(renderPlace::get).build());
 
               private final Setting<SettingColor> placeLineColor = sgRender.add(new ColorSetting.Builder()
-                  .name("place-line-color")
-                  .description("Outline color of the placement indicator.")
+                  .name("place-line-color").description("Outline color of the placement indicator.")
                   .defaultValue(new SettingColor(0, 255, 100, 200))
-                  .visible(renderPlace::get)
-                  .build());
+                  .visible(renderPlace::get).build());
 
               private final Setting<Boolean> renderBreak = sgRender.add(new BoolSetting.Builder()
-                  .name("render-break-pos")
-                  .description("Render the crystal being targeted for breaking.")
-                  .defaultValue(true)
-                  .build());
+                  .name("render-break-pos").description("Render the crystal being targeted for breaking.")
+                  .defaultValue(true).build());
 
               private final Setting<SettingColor> breakColor = sgRender.add(new ColorSetting.Builder()
-                  .name("break-color")
-                  .description("Color of the break target indicator.")
+                  .name("break-color").description("Color of the break target indicator.")
                   .defaultValue(new SettingColor(255, 50, 50, 80))
-                  .visible(renderBreak::get)
-                  .build());
+                  .visible(renderBreak::get).build());
 
               private final Setting<SettingColor> breakLineColor = sgRender.add(new ColorSetting.Builder()
-                  .name("break-line-color")
-                  .description("Outline color of the break target indicator.")
+                  .name("break-line-color").description("Outline color of the break target indicator.")
                   .defaultValue(new SettingColor(255, 50, 50, 200))
-                  .visible(renderBreak::get)
-                  .build());
+                  .visible(renderBreak::get).build());
 
               private final Setting<ShapeMode> shapeMode = sgRender.add(new EnumSetting.Builder<ShapeMode>()
-                  .name("shape-mode")
-                  .description("Render shape mode (LINES, SIDES, BOTH).")
-                  .defaultValue(ShapeMode.BOTH)
-                  .build());
+                  .name("shape-mode").description("Render shape mode (LINES, SIDES, BOTH).")
+                  .defaultValue(ShapeMode.BOTH).build());
 
-              // ── State ─────────────────────────────────────────────────────────────
               private int placeTimer = 0;
               private int breakTimer = 0;
               private BlockPos bestPlacePos = null;
               private EndCrystalEntity bestBreakTarget = null;
 
               public CpvpKillPv2() {
-                  super(
-                      Categories.COMBAT,
-                      "cpvp-killpv2",
-                      "High-performance Crystal PVP for Anarchy servers."
-                  );
+                  super(Categories.COMBAT, "cpvp-killpv2",
+                      "High-performance Crystal PVP for Anarchy servers.");
               }
 
               @Override
@@ -498,7 +435,6 @@ jobs:
                   bestBreakTarget = null;
               }
 
-              // ── Main Tick ─────────────────────────────────────────────────────────
               @EventHandler
               private void onTick(TickEvent.Pre event) {
                   if (mc.player == null || mc.world == null) return;
@@ -506,54 +442,38 @@ jobs:
 
                   PlayerEntity target = findBestTarget();
                   if (target == null) return;
-
                   if (!ensureCrystal()) return;
 
-                  // Break
                   if (breakTimer <= 0) {
                       bestBreakTarget = findBestBreakTarget(target);
                       if (bestBreakTarget != null) {
                           attackCrystal(bestBreakTarget);
                           breakTimer = breakDelay.get();
                       }
-                  } else {
-                      breakTimer--;
-                  }
+                  } else { breakTimer--; }
 
-                  // Place
                   if (placeTimer <= 0) {
                       bestPlacePos = findBestPlacePos(target);
                       if (bestPlacePos != null) {
                           placeCrystal(bestPlacePos);
-                          if (instantBreak.get()) {
-                              tickBreakInstant(target);
-                          }
+                          if (instantBreak.get()) tickBreakInstant(target);
                           placeTimer = placeDelay.get();
                       }
-                  } else {
-                      placeTimer--;
-                  }
+                  } else { placeTimer--; }
               }
 
-              // ── Render ────────────────────────────────────────────────────────────
               @EventHandler
               private void onRender(Render3DEvent event) {
                   if (renderPlace.get() && bestPlacePos != null) {
-                      event.renderer.box(bestPlacePos,
-                          placeColor.get(), placeLineColor.get(),
-                          shapeMode.get(), 0);
+                      event.renderer.box(bestPlacePos, placeColor.get(),
+                          placeLineColor.get(), shapeMode.get(), 0);
                   }
                   if (renderBreak.get() && bestBreakTarget != null && bestBreakTarget.isAlive()) {
                       Box box = bestBreakTarget.getBoundingBox();
-                      event.renderer.box(box,
-                          breakColor.get(), breakLineColor.get(),
-                          shapeMode.get(), 0);
+                      event.renderer.box(box, breakColor.get(),
+                          breakLineColor.get(), shapeMode.get(), 0);
                   }
               }
-
-              // ══════════════════════════════════════════════════════════════════════
-              //  HELPERS
-              // ══════════════════════════════════════════════════════════════════════
 
               private boolean isPaused() {
                   if (mc.player == null) return false;
@@ -578,7 +498,6 @@ jobs:
                   return best;
               }
 
-              // FIX: replaced EntityUtils.isFriend() with Friends.get().isFriend()
               private boolean isValidTarget(Entity e) {
                   if (e == mc.player) return false;
                   if (!(e instanceof PlayerEntity p)) return false;
@@ -593,10 +512,8 @@ jobs:
                   if (!silentMode.get()) return false;
 
                   InvUtils.FindItemResult result = InvUtils.findInHotbar(Items.END_CRYSTAL);
-                  if (result.found()) {
-                      InvUtils.swap(result.slot(), false);
-                      return true;
-                  }
+                  if (result.found()) { InvUtils.swap(result.slot(), false); return true; }
+
                   result = InvUtils.find(Items.END_CRYSTAL);
                   if (result.found()) {
                       InvUtils.move().from(result.slot()).toHotbar(mc.player.getInventory().selectedSlot);
@@ -618,34 +535,23 @@ jobs:
                               if (!isValidBase(pos)) continue;
                               if (!mc.world.getBlockState(pos.up()).isAir()) continue;
                               if (!mc.world.getBlockState(pos.up(2)).isAir()) continue;
-
                               Vec3d crystalPos = Vec3d.ofCenter(pos.up());
-                              double dist = eyePos.distanceTo(crystalPos);
-                              if (dist > placeRange.get()) continue;
-
+                              if (eyePos.distanceTo(crystalPos) > placeRange.get()) continue;
                               candidates.add(pos);
                           }
                       }
                   }
 
-                  if (candidates.isEmpty()) return null;
-
                   BlockPos best = null;
                   double bestScore = -Double.MAX_VALUE;
-
                   for (BlockPos pos : candidates) {
                       Vec3d crystalCenter = Vec3d.ofCenter(pos.up());
                       double dmgToTarget = CrystalCalc.damage(crystalCenter, target);
                       double dmgToSelf   = CrystalCalc.damage(crystalCenter, mc.player);
-
                       if (dmgToTarget < minDamageToPlace.get()) continue;
                       if (antiSelfDamage.get() && dmgToSelf > selfDamageMax.get()) continue;
-
                       double score = dmgToTarget - (dmgToSelf * 0.5);
-                      if (score > bestScore) {
-                          bestScore = score;
-                          best = pos;
-                      }
+                      if (score > bestScore) { bestScore = score; best = pos; }
                   }
                   return best;
               }
@@ -663,69 +569,45 @@ jobs:
               private EndCrystalEntity findBestBreakTarget(PlayerEntity target) {
                   EndCrystalEntity best = null;
                   double bestDmg = -1;
-
                   for (Entity e : mc.world.getEntities()) {
                       if (!(e instanceof EndCrystalEntity crystal)) continue;
                       if (!crystal.isAlive()) continue;
-
                       double dist = mc.player.getEyePos().distanceTo(crystal.getPos());
                       double maxR = breakThruWalls.get() ? breakWallRange.get() : breakRange.get();
                       if (dist > maxR) continue;
-
                       Vec3d cPos = crystal.getPos().add(0, 1, 0);
                       double dmgToTarget = CrystalCalc.damage(cPos, target);
                       double dmgToSelf   = CrystalCalc.damage(cPos, mc.player);
-
                       if (dmgToTarget < minDamageToBreak.get()) continue;
                       if (antiSelfDamage.get() && dmgToSelf > selfDamageMax.get()) continue;
-
-                      if (dmgToTarget > bestDmg) {
-                          bestDmg = dmgToTarget;
-                          best = crystal;
-                      }
+                      if (dmgToTarget > bestDmg) { bestDmg = dmgToTarget; best = crystal; }
                   }
                   return best;
               }
 
               private void attackCrystal(EndCrystalEntity crystal) {
                   if (rotate.get()) {
-                      Rotations.rotate(
-                          Rotations.getYaw(crystal),
-                          Rotations.getPitch(crystal),
-                          () -> sendAttackPacket(crystal)
-                      );
-                  } else {
-                      sendAttackPacket(crystal);
-                  }
+                      Rotations.rotate(Rotations.getYaw(crystal), Rotations.getPitch(crystal),
+                          () -> sendAttackPacket(crystal));
+                  } else { sendAttackPacket(crystal); }
               }
 
-              // FIX: PlayerInteractEntityC2SPacket.attack() correct for MC 1.21.1
               private void sendAttackPacket(EndCrystalEntity crystal) {
                   mc.player.networkHandler.sendPacket(
-                      PlayerInteractEntityC2SPacket.attack(crystal, mc.player.isSneaking())
-                  );
-                  mc.player.networkHandler.sendPacket(
-                      new HandSwingC2SPacket(Hand.MAIN_HAND)
-                  );
+                      PlayerInteractEntityC2SPacket.attack(crystal, mc.player.isSneaking()));
+                  mc.player.networkHandler.sendPacket(new HandSwingC2SPacket(Hand.MAIN_HAND));
               }
 
               private void placeCrystal(BlockPos pos) {
                   BlockHitResult hitResult = new BlockHitResult(
-                      Vec3d.ofCenter(pos), Direction.UP, pos, false
-                  );
+                      Vec3d.ofCenter(pos), Direction.UP, pos, false);
                   Hand hand = mc.player.getMainHandStack().getItem() == Items.END_CRYSTAL
                       ? Hand.MAIN_HAND : Hand.OFF_HAND;
-
                   if (rotate.get()) {
                       Vec3d center = Vec3d.ofCenter(pos);
-                      Rotations.rotate(
-                          Rotations.getYaw(center),
-                          Rotations.getPitch(center),
-                          () -> mc.interactionManager.interactBlock(mc.player, hand, hitResult)
-                      );
-                  } else {
-                      mc.interactionManager.interactBlock(mc.player, hand, hitResult);
-                  }
+                      Rotations.rotate(Rotations.getYaw(center), Rotations.getPitch(center),
+                          () -> mc.interactionManager.interactBlock(mc.player, hand, hitResult));
+                  } else { mc.interactionManager.interactBlock(mc.player, hand, hitResult); }
               }
 
               private void tickBreakInstant(PlayerEntity target) {
@@ -733,29 +615,22 @@ jobs:
                   Vec3d center = Vec3d.ofCenter(bestPlacePos.up());
                   for (Entity e : mc.world.getEntities()) {
                       if (!(e instanceof EndCrystalEntity crystal)) continue;
-                      if (crystal.getPos().distanceTo(center) < 1.5) {
-                          attackCrystal(crystal);
-                      }
+                      if (crystal.getPos().distanceTo(center) < 1.5) attackCrystal(crystal);
                   }
               }
 
-              // ── Crystal Damage Calculator ─────────────────────────────────────────
               private static class CrystalCalc {
-                  static double damage(Vec3d crystalPos,
-                                       net.minecraft.entity.LivingEntity entity) {
+                  static double damage(Vec3d crystalPos, net.minecraft.entity.LivingEntity entity) {
                       if (entity == null) return 0;
                       Vec3d entityCenter = entity.getPos().add(0, entity.getHeight() / 2.0, 0);
                       double dist = crystalPos.distanceTo(entityCenter);
                       double maxDist = 12.0;
                       if (dist > maxDist) return 0;
-
                       double exposure = 1.0 - (dist / maxDist);
                       double baseDamage = (exposure * exposure + exposure) / 2.0 * 7.0 * 6.0 + 1;
-
                       float armor = entity.getArmor();
                       double afterArmor = baseDamage * (1.0 - Math.min(20.0,
                           Math.max(armor / 5.0, armor - baseDamage / 3.0)) / 25.0);
-
                       return Math.max(0, afterArmor);
                   }
               }
@@ -763,26 +638,14 @@ jobs:
           JAVA_EOF
 
       # ─────────────────────────────────────────
-      # 13. gradlew — FIX: use JAVA_HOME properly
+      # 13. gradlew — Download official script (not hand-written)
+      # FIX: curl the real gradlew from Gradle GitHub instead of writing manually
       # ─────────────────────────────────────────
-      - name: Write gradlew
+      - name: Download Official gradlew
         run: |
-          cat > gradlew << 'SH_EOF'
-          #!/usr/bin/env sh
-          ##############################################################################
-          # Gradle start up script for UN*X
-          ##############################################################################
-          APP_HOME="$(cd "$(dirname "$0")" && pwd)"
-          CLASSPATH="$APP_HOME/gradle/wrapper/gradle-wrapper.jar"
-
-          if [ -n "$JAVA_HOME" ]; then
-              JAVACMD="$JAVA_HOME/bin/java"
-          else
-              JAVACMD="java"
-          fi
-
-          exec "$JAVACMD" -classpath "$CLASSPATH" org.gradle.wrapper.GradleWrapperMain "$@"
-          SH_EOF
+          curl -fsSL \
+            "https://raw.githubusercontent.com/gradle/gradle/v8.8.0/gradlew" \
+            -o gradlew
           chmod +x gradlew
 
       # ─────────────────────────────────────────
