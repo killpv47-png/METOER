@@ -1,0 +1,618 @@
+# ============================================================================
+#  6b6tkill — Meteor Client Addon for Energy 6b6t (Minecraft 1.21.1)
+# ============================================================================
+#  Single-file, self-contained GitHub Actions workflow.
+#  Every source file (Java, Gradle scripts, fabric.mod.json, icon) is embedded
+#  as a YAML string inside `jobs.build.env.*` and materialized to disk by the
+#  first workflow step. After that, a normal `gradle build` produces the JAR,
+#  which is then uploaded as an artifact and attached to a GitHub release.
+#
+#  Modules provided:
+#    - InstantRebreak     (Category: "6b6tkill")
+#         > Automatically breaks and rebreaks obsidian/anchor/netherite
+#           surround around a target player using the light-speed packet
+#           exploit. Settings: range, speed, light-speed, friend-remove,
+#           render color, and more.
+#
+#  How to use:
+#    1. Put this file at .github/workflows/build.yml in a fresh repo.
+#    2. Push to main, or run the workflow manually via "Run workflow".
+#    3. Download the JAR from the Actions run's Artifacts, drop it in
+#       your .minecraft/mods folder alongside Meteor Client 0.5.8 (1.21.1).
+# ============================================================================
+
+name: Build 6b6tkill Addon
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build addon JAR
+    runs-on: ubuntu-latest
+
+    env:
+      # ------------------------------------------------------------------
+      #  Embedded sources — DO NOT change indentation of the block scalars.
+      # ------------------------------------------------------------------
+      SRC_ADDON_JAVA: |
+            package com.sixb6t.kill;
+
+            import com.mojang.logging.LogUtils;
+            import com.sixb6t.kill.modules.InstantRebreak;
+            import meteordevelopment.meteorclient.addons.GithubRepo;
+            import meteordevelopment.meteorclient.addons.MeteorAddon;
+            import meteordevelopment.meteorclient.systems.modules.Category;
+            import meteordevelopment.meteorclient.systems.modules.Modules;
+            import org.slf4j.Logger;
+
+            public class Addon6b6tkill extends MeteorAddon {
+                public static final Logger LOG = LogUtils.getLogger();
+                public static final Category CATEGORY = new Category("6b6tkill");
+
+                @Override
+                public void onInitialize() {
+                    LOG.info("[6b6tkill] Initializing addon for Energy 6b6t (MC 1.21.1) ...");
+                    Modules.get().add(new InstantRebreak());
+                    LOG.info("[6b6tkill] Ready. Enjoy your kills.");
+                }
+
+                @Override
+                public void onRegisterCategories() {
+                    Modules.registerCategory(CATEGORY);
+                }
+
+                @Override
+                public String getPackage() {
+                    return "com.sixb6t.kill";
+                }
+
+                @Override
+                public GithubRepo getRepo() {
+                    return new GithubRepo("energy6b6t", "6b6tkill");
+                }
+            }
+
+      SRC_MODULE_JAVA: |
+            package com.sixb6t.kill.modules;
+
+            import com.sixb6t.kill.Addon6b6tkill;
+            import meteordevelopment.meteorclient.events.render.Render3DEvent;
+            import meteordevelopment.meteorclient.events.world.TickEvent;
+            import meteordevelopment.meteorclient.renderer.ShapeMode;
+            import meteordevelopment.meteorclient.settings.*;
+            import meteordevelopment.meteorclient.systems.friends.Friends;
+            import meteordevelopment.meteorclient.systems.modules.Module;
+            import meteordevelopment.meteorclient.utils.player.FindItemResult;
+            import meteordevelopment.meteorclient.utils.player.InvUtils;
+            import meteordevelopment.meteorclient.utils.player.Rotations;
+            import meteordevelopment.meteorclient.utils.render.color.Color;
+            import meteordevelopment.meteorclient.utils.render.color.SettingColor;
+            import meteordevelopment.orbit.EventHandler;
+            import net.minecraft.block.Block;
+            import net.minecraft.block.Blocks;
+            import net.minecraft.entity.player.PlayerEntity;
+            import net.minecraft.item.Items;
+            import net.minecraft.item.ItemStack;
+            import net.minecraft.item.PickaxeItem;
+            import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
+            import net.minecraft.util.math.BlockPos;
+            import net.minecraft.util.math.Box;
+            import net.minecraft.util.math.Direction;
+            import net.minecraft.util.math.Vec3d;
+
+            import java.util.ArrayList;
+            import java.util.Comparator;
+            import java.util.List;
+
+            public class InstantRebreak extends Module {
+                private final SettingGroup sgGeneral = settings.getDefaultGroup();
+                private final SettingGroup sgSpeed = settings.createGroup("Speed");
+                private final SettingGroup sgTargeting = settings.createGroup("Targeting");
+                private final SettingGroup sgRender = settings.createGroup("Render");
+
+                // --- General ---
+                private final Setting<Double> range = sgGeneral.add(new DoubleSetting.Builder()
+                    .name("range")
+                    .description("Maximum distance (blocks) to search around a target player for their surround / anchor blocks.")
+                    .defaultValue(5.0)
+                    .min(1.0)
+                    .sliderRange(1.0, 8.0)
+                    .build()
+                );
+
+                private final Setting<Boolean> autoSwap = sgGeneral.add(new BoolSetting.Builder()
+                    .name("auto-swap-pickaxe")
+                    .description("Automatically switch to the fastest pickaxe when breaking.")
+                    .defaultValue(true)
+                    .build()
+                );
+
+                private final Setting<Boolean> swapBack = sgGeneral.add(new BoolSetting.Builder()
+                    .name("swap-back")
+                    .description("Switch back to your previous slot after breaking.")
+                    .defaultValue(true)
+                    .build()
+                );
+
+                private final Setting<Boolean> rotate = sgGeneral.add(new BoolSetting.Builder()
+                    .name("rotate")
+                    .description("Rotate server-side toward the block being broken.")
+                    .defaultValue(true)
+                    .build()
+                );
+
+                private final Setting<Boolean> rebreak = sgGeneral.add(new BoolSetting.Builder()
+                    .name("rebreak")
+                    .description("If a broken block is replaced (rebreak by enemy), instantly break it again — this is the core Rebreak feature.")
+                    .defaultValue(true)
+                    .build()
+                );
+
+                private final Setting<Boolean> onlyOnCrystals = sgGeneral.add(new BoolSetting.Builder()
+                    .name("only-when-crystal-nearby")
+                    .description("Only trigger when a crystal is placed near the target (typical anchor-defense scenario).")
+                    .defaultValue(false)
+                    .build()
+                );
+
+                // --- Speed ---
+                private final Setting<Boolean> lightSpeed = sgSpeed.add(new BoolSetting.Builder()
+                    .name("light-speed")
+                    .description("Use the light-speed break exploit (multiple START/STOP packets per tick). Very fast but detectable.")
+                    .defaultValue(true)
+                    .build()
+                );
+
+                private final Setting<Integer> packetsPerTick = sgSpeed.add(new IntSetting.Builder()
+                    .name("packets-per-tick")
+                    .description("How many break-packet bursts to send per tick when light-speed is on.")
+                    .defaultValue(4)
+                    .min(1)
+                    .sliderRange(1, 20)
+                    .visible(lightSpeed::get)
+                    .build()
+                );
+
+                private final Setting<Integer> speed = sgSpeed.add(new IntSetting.Builder()
+                    .name("speed")
+                    .description("Delay in ticks between break attempts (only used if light-speed is off).")
+                    .defaultValue(0)
+                    .min(0)
+                    .sliderRange(0, 20)
+                    .visible(() -> !lightSpeed.get())
+                    .build()
+                );
+
+                private final Setting<Boolean> instantMine = sgSpeed.add(new BoolSetting.Builder()
+                    .name("instant-mine-abuse")
+                    .description("Abuse the client-side instant-mine bug via ABORT_DESTROY_BLOCK spam. Works best on anarchy servers.")
+                    .defaultValue(true)
+                    .build()
+                );
+
+                // --- Targeting ---
+                private final Setting<List<Block>> blocks = sgTargeting.add(new BlockListSetting.Builder()
+                    .name("blocks")
+                    .description("Blocks to break around targets.")
+                    .defaultValue(Blocks.OBSIDIAN, Blocks.CRYING_OBSIDIAN, Blocks.NETHERITE_BLOCK, Blocks.RESPAWN_ANCHOR, Blocks.ENDER_CHEST)
+                    .build()
+                );
+
+                private final Setting<Boolean> friendRemove = sgTargeting.add(new BoolSetting.Builder()
+                    .name("friend-remove")
+                    .description("Ignore friends (do not break the obsidian around a friend).")
+                    .defaultValue(true)
+                    .build()
+                );
+
+                // --- Render ---
+                private final Setting<Boolean> render = sgRender.add(new BoolSetting.Builder()
+                    .name("render")
+                    .description("Render a box around the block being broken.")
+                    .defaultValue(true)
+                    .build()
+                );
+
+                private final Setting<ShapeMode> shapeMode = sgRender.add(new EnumSetting.Builder<ShapeMode>()
+                    .name("shape-mode")
+                    .description("How the render box is drawn.")
+                    .defaultValue(ShapeMode.Both)
+                    .visible(render::get)
+                    .build()
+                );
+
+                private final Setting<SettingColor> sideColor = sgRender.add(new ColorSetting.Builder()
+                    .name("side-color")
+                    .description("Fill color of the render box.")
+                    .defaultValue(new SettingColor(255, 25, 25, 40))
+                    .visible(render::get)
+                    .build()
+                );
+
+                private final Setting<SettingColor> lineColor = sgRender.add(new ColorSetting.Builder()
+                    .name("line-color")
+                    .description("Outline color of the render box.")
+                    .defaultValue(new SettingColor(255, 25, 25, 255))
+                    .visible(render::get)
+                    .build()
+                );
+
+                // --- Internal state ---
+                private final List<BlockPos> renderList = new ArrayList<>();
+                private BlockPos currentTarget = null;
+                private int tickCounter = 0;
+
+                public InstantRebreak() {
+                    super(Addon6b6tkill.CATEGORY, "instant-rebreak",
+                        "Instantly breaks and rebreaks the obsidian surround around a target player on 6b6t / Energy 6b6t. Uses the light-speed break exploit.");
+                }
+
+                @Override
+                public void onActivate() {
+                    renderList.clear();
+                    currentTarget = null;
+                    tickCounter = 0;
+                }
+
+                @Override
+                public void onDeactivate() {
+                    renderList.clear();
+                    currentTarget = null;
+                    if (swapBack.get() && InvUtils.previousSlot != -1) {
+                        InvUtils.swapBack();
+                    }
+                }
+
+                @EventHandler
+                private void onTick(TickEvent.Pre event) {
+                    if (mc.player == null || mc.world == null || mc.interactionManager == null) return;
+
+                    // Speed limiter when light-speed is off
+                    if (!lightSpeed.get()) {
+                        tickCounter++;
+                        if (tickCounter < speed.get()) return;
+                        tickCounter = 0;
+                    }
+
+                    renderList.clear();
+
+                    // Find nearest target player
+                    PlayerEntity target = findTarget();
+                    if (target == null) {
+                        currentTarget = null;
+                        if (swapBack.get() && InvUtils.previousSlot != -1) InvUtils.swapBack();
+                        return;
+                    }
+
+                    // Find best obsidian block to break (closest to the target's head)
+                    BlockPos bestBlock = findBreakBlock(target);
+                    if (bestBlock == null) {
+                        currentTarget = null;
+                        if (swapBack.get() && InvUtils.previousSlot != -1) InvUtils.swapBack();
+                        return;
+                    }
+
+                    currentTarget = bestBlock;
+                    renderList.add(bestBlock);
+
+                    // Rotate
+                    if (rotate.get()) {
+                        double yaw = Rotations.getYaw(bestBlock);
+                        double pitch = Rotations.getPitch(bestBlock);
+                        Rotations.rotate(yaw, pitch, 50, () -> doBreak(bestBlock));
+                    } else {
+                        doBreak(bestBlock);
+                    }
+                }
+
+                private void doBreak(BlockPos pos) {
+                    if (mc.player == null || mc.interactionManager == null || mc.getNetworkHandler() == null) return;
+
+                    // Auto swap to best pickaxe
+                    if (autoSwap.get()) {
+                        FindItemResult pickaxe = InvUtils.findInHotbar(itemStack ->
+                            itemStack.getItem() instanceof PickaxeItem
+                        );
+                        if (pickaxe.found() && pickaxe.slot() != mc.player.getInventory().selectedSlot) {
+                            InvUtils.swap(pickaxe.slot(), swapBack.get());
+                        }
+                    }
+
+                    // Direction (which face we hit). Facing UP is a safe default and doesn't matter for the exploit.
+                    Direction dir = Direction.UP;
+
+                    int bursts = lightSpeed.get() ? Math.max(1, packetsPerTick.get()) : 1;
+
+                    for (int i = 0; i < bursts; i++) {
+                        // Full break packet cycle. This is the light-speed exploit pattern.
+                        mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(
+                            PlayerActionC2SPacket.Action.START_DESTROY_BLOCK, pos, dir));
+
+                        if (instantMine.get()) {
+                            // ABORT resets the cooldown on server-side breaking cooldown check on many exploit servers
+                            mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(
+                                PlayerActionC2SPacket.Action.ABORT_DESTROY_BLOCK, pos, dir));
+                        }
+
+                        mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(
+                            PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, pos, dir));
+                    }
+
+                    // Client-side swing so animation shows
+                    mc.player.swingHand(mc.player.getActiveHand());
+                }
+
+                private PlayerEntity findTarget() {
+                    PlayerEntity nearest = null;
+                    double nearestDist = Double.MAX_VALUE;
+
+                    for (PlayerEntity p : mc.world.getPlayers()) {
+                        if (p == mc.player) continue;
+                        if (p.isDead() || p.getHealth() <= 0f) continue;
+
+                        // Friend filter
+                        if (friendRemove.get() && Friends.get().isFriend(p)) continue;
+
+                        double dist = mc.player.squaredDistanceTo(p);
+                        if (dist > range.get() * range.get() * 4) continue;
+
+                        if (dist < nearestDist) {
+                            nearestDist = dist;
+                            nearest = p;
+                        }
+                    }
+                    return nearest;
+                }
+
+                private BlockPos findBreakBlock(PlayerEntity target) {
+                    BlockPos targetHead = target.getBlockPos().up();
+
+                    // If "only-when-crystal-nearby" is on, verify a crystal exists near the target
+                    if (onlyOnCrystals.get()) {
+                        boolean crystalNearby = mc.world.getOtherEntities(null,
+                            new Box(targetHead).expand(3.0),
+                            e -> e.getType().toString().toLowerCase().contains("crystal")
+                        ).size() > 0;
+                        if (!crystalNearby) return null;
+                    }
+
+                    // Candidate positions: surround (4 sides of head + head-above)
+                    List<BlockPos> candidates = new ArrayList<>();
+                    candidates.add(targetHead.north());
+                    candidates.add(targetHead.south());
+                    candidates.add(targetHead.east());
+                    candidates.add(targetHead.west());
+                    candidates.add(targetHead.up());      // top of head — anchor/crystal seat
+                    candidates.add(target.getBlockPos().north());
+                    candidates.add(target.getBlockPos().south());
+                    candidates.add(target.getBlockPos().east());
+                    candidates.add(target.getBlockPos().west());
+
+                    // Pick the closest matching block
+                    candidates.sort(Comparator.comparingDouble(p ->
+                        mc.player.squaredDistanceTo(Vec3d.ofCenter(p))
+                    ));
+
+                    // In MC 1.21.1 reach is 4.5 blocks for entities and 5.0 for blocks (creative), we use ~6 to be lenient.
+                    double reach = 6.0;
+                    double reachSq = reach * reach;
+
+                    for (BlockPos pos : candidates) {
+                        Block b = mc.world.getBlockState(pos).getBlock();
+                        if (!blocks.get().contains(b)) continue;
+
+                        if (mc.player.getEyePos().squaredDistanceTo(Vec3d.ofCenter(pos)) > reachSq + 2.0) continue;
+
+                        return pos;
+                    }
+                    return null;
+                }
+
+                @EventHandler
+                private void onRender(Render3DEvent event) {
+                    if (!render.get()) return;
+                    for (BlockPos pos : renderList) {
+                        double x = pos.getX();
+                        double y = pos.getY();
+                        double z = pos.getZ();
+                        event.renderer.box(x, y, z, x + 1, y + 1, z + 1,
+                            sideColor.get(), lineColor.get(), shapeMode.get(), 0);
+                    }
+                }
+            }
+
+      SRC_BUILD_GRADLE: |
+            plugins {
+                id "fabric-loom" version "1.7-SNAPSHOT"
+            }
+
+            base {
+                archivesBaseName = project.archives_base_name
+                version = project.mod_version
+                group = project.maven_group
+            }
+
+            repositories {
+                maven {
+                    name = "Meteor Dev Releases"
+                    url = "https://maven.meteordev.org/releases"
+                }
+                maven {
+                    name = "Meteor Dev Snapshots"
+                    url = "https://maven.meteordev.org/snapshots"
+                }
+            }
+
+            dependencies {
+                // Fabric
+                minecraft "com.mojang:minecraft:${project.minecraft_version}"
+                mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+                modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+
+                // Meteor
+                modImplementation "meteordevelopment:meteor-client:${project.meteor_version}"
+            }
+
+            tasks {
+                processResources {
+                    def propertyMap = [
+                        "version"   : project.version,
+                        "mc_version": project.minecraft_version,
+                    ]
+
+                    inputs.properties(propertyMap)
+                    filesMatching("fabric.mod.json") {
+                        expand(propertyMap)
+                    }
+                }
+
+                jar {
+                    from("LICENSE") {
+                        rename { "${it}_${project.base.archivesBaseName}" }
+                    }
+                }
+            }
+
+            java {
+                sourceCompatibility = JavaVersion.VERSION_21
+                targetCompatibility = JavaVersion.VERSION_21
+            }
+
+            tasks.withType(JavaCompile).configureEach {
+                it.options.encoding = "UTF-8"
+                it.options.release = 21
+            }
+
+      SRC_GRADLE_PROPERTIES: |
+            org.gradle.jvmargs=-Xmx2G
+
+            # Fabric Properties (https://fabricmc.net/develop)
+            minecraft_version=1.21.1
+            yarn_mappings=1.21.1+build.3
+            loader_version=0.16.5
+
+            # Mod Properties
+            mod_version=1.0.0
+            maven_group=com.sixb6t.kill
+            archives_base_name=6b6tkill
+
+            # Meteor (https://maven.meteordev.org)
+            meteor_version=0.5.8-SNAPSHOT
+
+      SRC_SETTINGS_GRADLE: |
+            pluginManagement {
+                repositories {
+                    maven {
+                        name = 'Fabric'
+                        url = 'https://maven.fabricmc.net/'
+                    }
+                    mavenCentral()
+                    gradlePluginPortal()
+                }
+            }
+
+            rootProject.name = "6b6tkill"
+
+      SRC_FABRIC_MOD_JSON: |
+            {
+              "schemaVersion": 1,
+              "id": "6b6tkill",
+              "version": "${version}",
+              "name": "6b6tkill",
+              "description": "Meteor Client addon for Energy 6b6t server (MC 1.21.1) — Instant Rebreak module with light-speed exploit.",
+              "authors": [
+                "6b6tkill dev"
+              ],
+              "contact": {
+                "repo": "https://github.com/energy6b6t/6b6tkill"
+              },
+              "icon": "assets/6b6tkill/icon.png",
+              "environment": "client",
+              "entrypoints": {
+                "meteor": [
+                  "com.sixb6t.kill.Addon6b6tkill"
+                ]
+              },
+              "custom": {
+                "meteor-client:color": "255,25,25"
+              },
+              "depends": {
+                "java": ">=21",
+                "minecraft": ["${mc_version}"],
+                "meteor-client": "*"
+              }
+            }
+
+      # Icon is a small 32x32 red PNG, stored base64.
+      ICON_PNG_B64: "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAALUlEQVR4nO3OIQEAAAwCMGrQP+gfAzMxv1x7SxEQEBAQEBAQEBAQEBAQEFgHHjKQwHnpiV3gAAAAAElFTkSuQmCC"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Materialize embedded sources on disk
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "== Creating project structure =="
+          mkdir -p build-src/src/main/java/com/sixb6t/kill/modules
+          mkdir -p build-src/src/main/resources/assets/6b6tkill
+
+          printf "%s" "$SRC_ADDON_JAVA"          > build-src/src/main/java/com/sixb6t/kill/Addon6b6tkill.java
+          printf "%s" "$SRC_MODULE_JAVA"         > build-src/src/main/java/com/sixb6t/kill/modules/InstantRebreak.java
+          printf "%s" "$SRC_BUILD_GRADLE"        > build-src/build.gradle
+          printf "%s" "$SRC_GRADLE_PROPERTIES"   > build-src/gradle.properties
+          printf "%s" "$SRC_SETTINGS_GRADLE"     > build-src/settings.gradle
+          printf "%s" "$SRC_FABRIC_MOD_JSON"     > build-src/src/main/resources/fabric.mod.json
+          echo "$ICON_PNG_B64" | base64 -d > build-src/src/main/resources/assets/6b6tkill/icon.png
+
+          echo "== Tree =="
+          find build-src -type f | sort
+
+          echo "== Preview fabric.mod.json =="
+          cat build-src/src/main/resources/fabric.mod.json
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build addon
+        shell: bash
+        working-directory: build-src
+        run: |
+          set -euo pipefail
+          gradle --no-daemon --stacktrace build
+
+      - name: Show produced JAR(s)
+        shell: bash
+        run: |
+          echo "== build/libs =="
+          ls -la build-src/build/libs/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 6b6tkill-jar
+          path: build-src/build/libs/*.jar
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish to GitHub Release (only on tags)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build-src/build/libs/*.jar
+          generate_release_notes: true
